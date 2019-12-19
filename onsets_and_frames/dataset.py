@@ -13,26 +13,32 @@ from .midi import parse_midi
 
 
 class PianoRollAudioDataset(Dataset):
-    def __init__(self, path, groups=None, sequence_length=None, seed=42, device=DEFAULT_DEVICE):
-        self.path = path
+    def __init__(self, path, groups=None, sequence_length=None, seed=42, device=DEFAULT_DEVICE, preload=True):
+        self.path = os.path.abspath(os.path.expanduser(path))
         self.groups = groups if groups is not None else self.available_groups()
         self.sequence_length = sequence_length
         self.device = device
         self.random = np.random.RandomState(seed)
+        self.preload = preload
 
         self.data = []
         print(f"Loading {len(groups)} group{'s' if len(groups) > 1 else ''} "
               f"of {self.__class__.__name__} at {path}")
+
         for group in groups:
             for input_files in tqdm(self.files(group), desc='Loading group %s' % group):
-                self.data.append(self.load(*input_files))
+                self.data.append(self.load(*input_files, preload=preload))
 
     def __getitem__(self, index):
         data = self.data[index]
         result = dict(path=data['path'])
 
+        audio = data['audio']
+        if audio is None:
+            audio = self.load_audio(data['path'])
+
         if self.sequence_length is not None:
-            audio_length = len(data['audio'])
+            audio_length = len(audio)
             step_begin = self.random.randint(audio_length - self.sequence_length) // HOP_LENGTH
             n_steps = self.sequence_length // HOP_LENGTH
             step_end = step_begin + n_steps
@@ -70,7 +76,12 @@ class PianoRollAudioDataset(Dataset):
         """return the list of input files (audio_filename, tsv_filename) for this group"""
         raise NotImplementedError
 
-    def load(self, audio_path, tsv_path):
+    def load_audio(self, audio_path):
+        audio, sr = soundfile.read(os.path.join(self.path, audio_path), dtype='int16')
+        assert sr == SAMPLE_RATE
+        return torch.ShortTensor(audio)
+
+    def load(self, audio_path, tsv_path, preload=True):
         """
         load an audio track and the corresponding labels
 
@@ -81,8 +92,8 @@ class PianoRollAudioDataset(Dataset):
             path: str
                 the path to the audio file
 
-            audio: torch.ShortTensor, shape = [num_samples]
-                the raw waveform
+            audio: torch.ShortTensor, shape = [num_samples] || None
+                the raw waveform, or None if preload is False
 
             label: torch.ByteTensor, shape = [num_steps, midi_bins]
                 a matrix that contains the onset/offset/frame labels encoded as:
@@ -91,14 +102,16 @@ class PianoRollAudioDataset(Dataset):
             velocity: torch.ByteTensor, shape = [num_steps, midi_bins]
                 a matrix that contains MIDI velocity values at the frame locations
         """
-        saved_data_path = audio_path.replace('.flac', '.pt').replace('.wav', '.pt')
+
+        saved_data_path = os.path.join(self.path, audio_path).replace('.flac', '.pt').replace('.wav', '.pt')
+
         if os.path.exists(saved_data_path):
-            return torch.load(saved_data_path)
+            data = torch.load(saved_data_path)
+            if not preload:
+                data['audio'] = None # remove the audio data
+            return data
 
-        audio, sr = soundfile.read(audio_path, dtype='int16')
-        assert sr == SAMPLE_RATE
-
-        audio = torch.ShortTensor(audio)
+        audio = self.load_audio(audio_path)
         audio_length = len(audio)
 
         n_keys = MAX_MIDI - MIN_MIDI + 1
@@ -107,7 +120,7 @@ class PianoRollAudioDataset(Dataset):
         label = torch.zeros(n_steps, n_keys, dtype=torch.uint8)
         velocity = torch.zeros(n_steps, n_keys, dtype=torch.uint8)
 
-        tsv_path = tsv_path
+        tsv_path = os.path.join(self.path, tsv_path)
         midi = np.loadtxt(tsv_path, delimiter='\t', skiprows=1)
 
         for onset, offset, note, vel in midi:
@@ -125,13 +138,15 @@ class PianoRollAudioDataset(Dataset):
 
         data = dict(path=audio_path, audio=audio, label=label, velocity=velocity)
         torch.save(data, saved_data_path)
+        if not preload:
+            data['audio'] = None
         return data
 
 
 class MAESTRO(PianoRollAudioDataset):
 
-    def __init__(self, path='data/MAESTRO', groups=None, sequence_length=None, seed=42, device=DEFAULT_DEVICE):
-        super().__init__(path, groups if groups is not None else ['train'], sequence_length, seed, device)
+    def __init__(self, path='data/MAESTRO', groups=None, sequence_length=None, seed=42, device=DEFAULT_DEVICE, preload=True):
+        super().__init__(path, groups if groups is not None else ['train'], sequence_length, seed, device, preload=preload)
 
     @classmethod
     def available_groups(cls):
@@ -161,7 +176,10 @@ class MAESTRO(PianoRollAudioDataset):
             if not os.path.exists(tsv_filename):
                 midi = parse_midi(midi_path)
                 np.savetxt(tsv_filename, midi, fmt='%.6f', delimiter='\t', header='onset,offset,note,velocity')
-            result.append((audio_path, tsv_filename))
+            result.append(
+                (os.path.relpath(audio_path, self.path),
+                 os.path.relpath(tsv_filename, self.path))
+            )
         return result
 
 

@@ -51,13 +51,15 @@ def config():
 
     bidirectional = True
 
+    preload = True
+
     ex.observers.append(FileStorageObserver.create(logdir))
 
 
 @ex.automain
 def train(logdir, datadir, device, iterations, resume_iteration, checkpoint_interval, train_on, batch_size, sequence_length,
           model_complexity, learning_rate, learning_rate_decay_steps, learning_rate_decay_rate, leave_one_out,
-          clip_gradient_norm, validation_length, validation_interval, bidirectional):
+          clip_gradient_norm, validation_length, validation_interval, bidirectional, preload):
     print_config(ex.current_run)
 
     os.makedirs(logdir, exist_ok=True)
@@ -71,8 +73,8 @@ def train(logdir, datadir, device, iterations, resume_iteration, checkpoint_inte
         validation_groups = [str(leave_one_out)]
 
     if train_on == 'MAESTRO':
-        dataset = MAESTRO(path=datadir, groups=train_groups, sequence_length=sequence_length)
-        validation_dataset = MAESTRO(path=datadir, groups=validation_groups, sequence_length=sequence_length)
+        dataset = MAESTRO(path=datadir, groups=train_groups, sequence_length=sequence_length, preload=preload)
+        validation_dataset = MAESTRO(path=datadir, groups=validation_groups, sequence_length=sequence_length, preload=preload)
     else:
         dataset = MAPS(groups=['AkPnBcht', 'AkPnBsdf', 'AkPnCGdD', 'AkPnStgb', 'SptkBGAm', 'SptkBGCl', 'StbgTGd2'], sequence_length=sequence_length)
         validation_dataset = MAPS(groups=['ENSTDkAm', 'ENSTDkCl'], sequence_length=validation_length)
