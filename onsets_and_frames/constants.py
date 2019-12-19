@@ -16,3 +16,5 @@ MEL_FMAX = SAMPLE_RATE // 2
 WINDOW_LENGTH = 2048
 
 DEFAULT_DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+MAESTRO_JSON = 'maestro-v2.0.0.json'

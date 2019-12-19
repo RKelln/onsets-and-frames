@@ -149,7 +149,7 @@ class MAESTRO(PianoRollAudioDataset):
             if len(files) == 0:
                 raise RuntimeError(f'Group {group} is empty')
         else:
-            metadata = json.load(open(os.path.join(self.path, 'maestro-v1.0.0.json')))
+            metadata = json.load(open(os.path.join(self.path, MAESTRO_JSON)))
             files = sorted([(os.path.join(self.path, row['audio_filename'].replace('.wav', '.flac')),
                              os.path.join(self.path, row['midi_filename'])) for row in metadata if row['split'] == group])
 

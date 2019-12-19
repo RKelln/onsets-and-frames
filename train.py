@@ -61,7 +61,7 @@ def train(logdir, device, iterations, resume_iteration, checkpoint_interval, tra
     train_groups, validation_groups = ['train'], ['validation']
 
     if leave_one_out is not None:
-        all_years = {'2004', '2006', '2008', '2009', '2011', '2013', '2014', '2015', '2017'}
+        all_years = {'2004', '2006', '2008', '2009', '2011', '2013', '2014', '2015', '2017', '2018'}
         train_groups = list(all_years - {str(leave_one_out)})
         validation_groups = [str(leave_one_out)]
 
