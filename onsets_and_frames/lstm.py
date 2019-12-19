@@ -5,9 +5,9 @@ from torch import nn
 class BiLSTM(nn.Module):
     inference_chunk_length = 512
 
-    def __init__(self, input_features, recurrent_features):
+    def __init__(self, input_features, recurrent_features, bidirectional=True):
         super().__init__()
-        self.rnn = nn.LSTM(input_features, recurrent_features, batch_first=True, bidirectional=True)
+        self.rnn = nn.LSTM(input_features, recurrent_features, batch_first=True, bidirectional=bidirectional)
 
     def forward(self, x):
         if self.training:

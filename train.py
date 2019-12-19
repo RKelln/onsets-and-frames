@@ -46,13 +46,15 @@ def config():
     validation_length = sequence_length
     validation_interval = 500
 
+    bidirectional = True
+
     ex.observers.append(FileStorageObserver.create(logdir))
 
 
 @ex.automain
 def train(logdir, device, iterations, resume_iteration, checkpoint_interval, train_on, batch_size, sequence_length,
           model_complexity, learning_rate, learning_rate_decay_steps, learning_rate_decay_rate, leave_one_out,
-          clip_gradient_norm, validation_length, validation_interval):
+          clip_gradient_norm, validation_length, validation_interval, bidirectional):
     print_config(ex.current_run)
 
     os.makedirs(logdir, exist_ok=True)
@@ -75,7 +77,7 @@ def train(logdir, device, iterations, resume_iteration, checkpoint_interval, tra
     loader = DataLoader(dataset, batch_size, shuffle=True, drop_last=True)
 
     if resume_iteration is None:
-        model = OnsetsAndFrames(N_MELS, MAX_MIDI - MIN_MIDI + 1, model_complexity).to(device)
+        model = OnsetsAndFrames(N_MELS, MAX_MIDI - MIN_MIDI + 1, model_complexity, bidirectional).to(device)
         optimizer = torch.optim.Adam(model.parameters(), learning_rate)
         resume_iteration = 0
     else:
