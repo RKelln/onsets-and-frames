@@ -46,13 +46,13 @@ class PianoRollAudioDataset(Dataset):
             begin = step_begin * HOP_LENGTH
             end = begin + self.sequence_length
 
-            result['audio'] = data['audio'][begin:end].to(self.device)
-            result['label'] = data['label'][step_begin:step_end, :].to(self.device)
-            result['velocity'] = data['velocity'][step_begin:step_end, :].to(self.device)
+            result['audio'] = audio[begin:end]
+            result['label'] = data['label'][step_begin:step_end, :]
+            result['velocity'] = data['velocity'][step_begin:step_end, :]
         else:
-            result['audio'] = data['audio'].to(self.device)
-            result['label'] = data['label'].to(self.device)
-            result['velocity'] = data['velocity'].to(self.device).float()
+            result['audio'] = audio
+            result['label'] = data['label']
+            result['velocity'] = data['velocity']
 
         result['audio'] = result['audio'].float().div_(32768.0)
         result['onset'] = (result['label'] == 3).float()

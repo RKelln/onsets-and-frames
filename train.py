@@ -96,7 +96,7 @@ def train(logdir, datadir, device, iterations, resume_iteration, checkpoint_inte
 
     loop = tqdm(range(resume_iteration + 1, iterations + 1))
     for i, batch in zip(loop, cycle(loader)):
-        predictions, losses = model.run_on_batch(batch)
+        predictions, losses = model.run_on_batch(batch, device=device)
 
         loss = sum(losses.values())
         optimizer.zero_grad()

@@ -11,6 +11,7 @@ from torch import nn
 from .lstm import BiLSTM
 from .mel import melspectrogram
 
+from .constants import *
 
 class ConvStack(nn.Module):
     def __init__(self, input_features, output_features):
@@ -93,12 +94,12 @@ class OnsetsAndFrames(nn.Module):
         velocity_pred = self.velocity_stack(mel)
         return onset_pred, offset_pred, activation_pred, frame_pred, velocity_pred
 
-    def run_on_batch(self, batch):
-        audio_label = batch['audio']
-        onset_label = batch['onset']
-        offset_label = batch['offset']
-        frame_label = batch['frame']
-        velocity_label = batch['velocity']
+    def run_on_batch(self, batch, device=DEFAULT_DEVICE):
+        audio_label = batch['audio'].to(device)
+        onset_label = batch['onset'].to(device)
+        offset_label = batch['offset'].to(device)
+        frame_label = batch['frame'].to(device)
+        velocity_label = batch['velocity'].to(device)
 
         mel = melspectrogram(audio_label.reshape(-1, audio_label.shape[-1])[:, :-1]).transpose(-1, -2)
         onset_pred, offset_pred, _, frame_pred, velocity_pred = self(mel)
