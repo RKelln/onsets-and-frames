@@ -81,13 +81,15 @@ class Output:
 class MidiOutput(Output):
     # NOTE: midi channels indexed from 1-16 but mido uses 0-15
     def __init__(self, midi_port, midi_channel):
+        self.start = time.monotonic()
         self.port_name = midi_port
         self.channel = min(15, max(0, midi_channel - 1))
 
     def send(self, messages):
+        ms_since_start = int(1000 * (time.monotonic() - self.start))
         for m in messages:
             m.channel = self.channel
-            print(self.port_name, m)
+            print('{:8d}: {:<12} >'.format(ms_since_start, self.port_name[:12]), m)
             self.port.send(m)
 
     def close(self):
@@ -133,36 +135,50 @@ async def ascii_spectrogram(fftsize, gain, low_bin, columns, **kwargs):
             print('no input')
 
 
-async def transcribe_frame(model, onset_threshold, frame_threshold, device, output, **kwargs):
+async def transcribe_frame(model, window, onset_threshold, frame_threshold, device, output, **kwargs):
 
-    sequence_length = 327680 // 100  # // 10 = 10ms,  // 100 = 5ms
-    now = time.perf_counter()
-    buf = RingBuffer(capacity=sequence_length, dtype= 'int16')
     count = 0
+    buf = RingBuffer(capacity=WINDOW_LENGTH, dtype= 'int16') #FIXME: use window
+    last_update = time.monotonic()
+    n_mels = N_MELS # int((window / WINDOW_LENGTH) * N_MELS)
+    
+    print("window: ", window, "n_mels:", n_mels, 100 * window / WINDOW_LENGTH, "%")
+
+    melspectrogram = MelSpectrogram(n_mels, SAMPLE_RATE, WINDOW_LENGTH, HOP_LENGTH, mel_fmin=MEL_FMIN, mel_fmax=MEL_FMAX)
+    melspectrogram.to(device)
 
     async for indata, status in inputstream_generator(**kwargs):
         if status:
             text = ' ' + str(status) + ' '
             print('\x1b[34;40m', text.center(columns, '#'),
                   '\x1b[0m', sep='')
-        if any(indata):
-            buf.extend(indata[:, 0])
-            count += len(indata)
-            if count >= sequence_length:
-                now = time.perf_counter()
+        data = indata[:, 0]
+        if any(data):
+            buf.extend(data)
+            count += len(data)
+            #print(count, len(data), buf.shape, buf.maxlen)
+
+            # FIXME: This is currently broken but seems to work well:
+            #        The model seems to have a fixed window length that will work, but we
+            #        want to predict at a faster rate, so we send the data for prediction
+            #        on a smaller window then the buffer size. Somehow this doesn't repeat notes...?
+            # TODO: instead of dropping data if over window length, do something smarter?
+            if count >= window and buf.is_full:
+                now = time.monotonic()
+                #print(1000 * (now - last_update), "between updates")
+                last_update = now
                 count = 0
                 audio = torch.ShortTensor(np.array(buf)).to(device)
                 audio = audio.float().div_(32768.0)
 
-                predictions = transcribe(model, audio)
+                predictions = transcribe(model, audio, melspectrogram)
                 messages = to_midi(predictions, onset_threshold, frame_threshold)
                 if len(messages) > 0:
                     output.send(messages)
-
-                #print("transcribe duration:", 1000 * (time.perf_counter() - now), 'ms')
         else:
-            count += 1
-            if count % 1000 == 0:
+            now = time.monotonic() 
+            if now - last_update > 10:
+                last_update = now
                 print('no input')
 
 async def wait_for_input():
@@ -256,6 +272,7 @@ async def main(list_devices=None, audio_device=None,
             audio_task = asyncio.create_task(
                 transcribe_frame(
                     model=model, 
+                    window=kwargs['window'],
                     onset_threshold=kwargs['onset_threshold'], 
                     frame_threshold=kwargs['frame_threshold'],
                     device=ml_device,
@@ -276,45 +293,23 @@ async def main(list_devices=None, audio_device=None,
                 return
 
 
-
-def transcribe(model, audio):
+def transcribe(model, audio, melspectrogram):
 
     mel = melspectrogram(audio.reshape(-1, audio.shape[-1])[:, :-1]).transpose(-1, -2)
+    start = time.monotonic()
     onset_pred, offset_pred, _, frame_pred, velocity_pred = model(mel)
+    end = time.monotonic()
 
     predictions = {
-            'onset': onset_pred.reshape((onset_pred.shape[1], onset_pred.shape[2])),
-            'offset': offset_pred.reshape((offset_pred.shape[1], offset_pred.shape[2])),
-            'frame': frame_pred.reshape((frame_pred.shape[1], frame_pred.shape[2])),
-            'velocity': velocity_pred.reshape((velocity_pred.shape[1], velocity_pred.shape[2]))
-        }
-
+        'onset': onset_pred.reshape((onset_pred.shape[1], onset_pred.shape[2])),
+        'offset': offset_pred.reshape((offset_pred.shape[1], offset_pred.shape[2])),
+        'frame': frame_pred.reshape((frame_pred.shape[1], frame_pred.shape[2])),
+        'velocity': velocity_pred.reshape((velocity_pred.shape[1], velocity_pred.shape[2])),
+        'start_time': start,
+        'end_time': end,
+    }
+    #print("predict time:", 1000 * (end-start))
     return predictions
-
-
-def transcribe_file(model_file, flac_paths, save_path, sequence_length,
-                  onset_threshold, frame_threshold, device):
-    
-    model = torch.load(model_file, map_location=device).eval()
-    summary(model)
-
-    for flac_path in flac_paths:
-        print(f'Processing {flac_path}...', file=sys.stderr)
-        audio = load_and_process_audio(flac_path, sequence_length, device)
-        predictions = transcribe(model, audio)
-
-        p_est, i_est, v_est = extract_notes(predictions['onset'], predictions['frame'], predictions['velocity'], onset_threshold, frame_threshold)
-
-        scaling = HOP_LENGTH / SAMPLE_RATE
-
-        i_est = (i_est * scaling).reshape(-1, 2)
-        p_est = np.array([midi_to_hz(MIN_MIDI + midi) for midi in p_est])
-
-        os.makedirs(save_path, exist_ok=True)
-        pred_path = os.path.join(save_path, os.path.basename(flac_path) + '.pred.png')
-        save_pianoroll(pred_path, predictions['onset'], predictions['frame'])
-        midi_path = os.path.join(save_path, os.path.basename(flac_path) + '.pred.mid')
-        save_midi(midi_path, p_est, i_est, v_est)
 
 
 def to_midi(predictions, onset_threshold, frame_threshold):
@@ -339,39 +334,18 @@ def to_midi(predictions, onset_threshold, frame_threshold):
         events.append(dict(type='off', pitch=pitches[i], time=intervals[i][1], velocity=velocities[i]))
     events.sort(key=lambda row: row['time'])
 
+    last_tick = 0
     midi_messages = []
     for event in events:
+        current_tick = event['time'] #int(event['time'] * ticks_per_second)
         velocity = int(event['velocity'] * 127)
         if velocity > 127:
             velocity = 127
         pitch = int(round(hz_to_midi(event['pitch'])))
-        midi_messages.append(mido.Message('note_' + event['type'], note=pitch, velocity=velocity))
+        midi_messages.append(mido.Message('note_' + event['type'], note=pitch, velocity=velocity, time=event['time']))
+        last_tick = current_tick
 
     return midi_messages
-
-
-def load_and_process_audio(flac_path, sequence_length, device):
-
-    audio, sr = soundfile.read(flac_path, dtype='int16')
-    assert sr == SAMPLE_RATE
-
-    audio = torch.ShortTensor(audio)
-
-    if sequence_length is not None:
-        audio_length = len(audio)
-        begin = 0
-        end = min(audio_length, begin + sequence_length)
-
-        audio = audio[begin:end].to(device)
-    else:
-        audio = audio.to(device)
-
-    audio = audio.float().div_(32768.0)
-
-    return audio
-
-
-
 
 
 if __name__ == "__main__":
@@ -383,7 +357,7 @@ if __name__ == "__main__":
     # model args
     parser.add_argument('model_file', nargs='?', type=str, default=None)
     parser.add_argument('--save-path', type=str, default='.')
-    parser.add_argument('--sequence-length', default=None, type=int)
+    parser.add_argument('-w', '--window', default=WINDOW_LENGTH, type=int)
     parser.add_argument('--onset-threshold', default=0.5, type=float)
     parser.add_argument('--frame-threshold', default=0.5, type=float)
     parser.add_argument('--ml-device', dest='ml_device', default='cuda' if torch.cuda.is_available() else 'cpu')
