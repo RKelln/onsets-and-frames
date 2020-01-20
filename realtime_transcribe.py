@@ -22,7 +22,6 @@ import time
 from mir_eval.util import midi_to_hz
 from mir_eval.util import hz_to_midi
 import numpy as np
-from numpy_ringbuffer import RingBuffer
 import sounddevice as sd
 import soundfile
 import mido
