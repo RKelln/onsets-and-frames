@@ -110,13 +110,13 @@ async def inputstream_generator(channels=1, **kwargs):
     loop = asyncio.get_event_loop()
 
     def callback(indata, frame_count, time_info, status):
-        loop.call_soon_threadsafe(q_in.put_nowait, (indata.copy(), status))
+        loop.call_soon_threadsafe(q_in.put_nowait, (indata.copy(), frame_count, status))
 
     stream = sd.InputStream(callback=callback, channels=channels, samplerate=SAMPLE_RATE, dtype='int16', **kwargs)
     with stream:
         while True:
-            indata, status = await q_in.get()
-            yield indata, status
+            indata, frame_count, status = await q_in.get()
+            yield indata, frame_count, status
 
 
 async def ascii_spectrogram(fftsize, gain, low_bin, columns, **kwargs):
@@ -138,40 +138,61 @@ async def ascii_spectrogram(fftsize, gain, low_bin, columns, **kwargs):
 
 async def transcribe_frame(model, window, onset_threshold, frame_threshold, device, output, **kwargs):
 
-    count = 0
-    buf = RingBuffer(capacity=WINDOW_LENGTH, dtype= 'int16') #FIXME: use window
     last_update = time.monotonic()
-    n_mels = N_MELS # int((window / WINDOW_LENGTH) * N_MELS)
-    
-    print("window: ", window, "n_mels:", n_mels, 100 * window / WINDOW_LENGTH, "%")
+    # note: WINDOW_LENGTH = 2048, but creates a lot of latency, 
+    # smaller than 1024 doesn't have the frequency resolution for mel
+    # 1024 seems the sweet spot but currently much worse accuracy than 2048
+    window_length = WINDOW_LENGTH 
+    buf = np.zeros(window_length, dtype='int16')
+    buf_end = 0
+    count = 0
 
-    melspectrogram = MelSpectrogram(n_mels, SAMPLE_RATE, WINDOW_LENGTH, HOP_LENGTH, mel_fmin=MEL_FMIN, mel_fmax=MEL_FMAX)
+    print("window: ", window,  100 * window / window_length, "%")
+
+    melspectrogram = MelSpectrogram(N_MELS, SAMPLE_RATE, window_length, HOP_LENGTH, mel_fmin=MEL_FMIN, mel_fmax=MEL_FMAX)
     melspectrogram.to(device)
 
-    async for indata, status in inputstream_generator(**kwargs):
+    async for indata, frame_count, status in inputstream_generator(**kwargs):
         if status:
             text = ' ' + str(status) + ' '
             print('\x1b[34;40m', text.center(columns, '#'),
                   '\x1b[0m', sep='')
+        
         data = indata[:, 0]
+        in_len = len(data)
         if any(data):
-            buf.extend(data)
-            count += len(data)
-            #print(count, len(data), buf.shape, buf.maxlen)
+            count += frame_count
+            #print(count, frame_count, indata.shape) #, buf.shape, buf.maxlen)
+                
+            if count < window:
+                # copy into buffer
+                # TODO: check for overruns
+                buf[buf_end:(buf_end+in_len)] = data
+                buf_end += in_len
+                #print("copy into buffer", buf_end, buf)
 
-            # FIXME: This is currently broken but seems to work well:
-            #        The model seems to have a fixed window length that will work, but we
-            #        want to predict at a faster rate, so we send the data for prediction
-            #        on a smaller window then the buffer size. Somehow this doesn't repeat notes...?
-            # TODO: instead of dropping data if over window length, do something smarter?
-            if count >= window and buf.is_full:
+            # FIXME: We place the buffer at the start of the window, and it can be smaller,
+            #        so that the latency is reduced 
+            else:
                 now = time.monotonic()
-                #print(1000 * (now - last_update), "between updates")
+                #print(int(1000 * (now - last_update)), "ms between updates")
                 last_update = now
-                count = 0
-                audio = torch.ShortTensor(np.array(buf)).to(device)
+
+                # fill up buffer to window
+                end = window - buf_end
+                buf[buf_end:window] = data[:end]
+                #print("fill to window: ", buf_end, end)
+
+                # TODO: does this copy buf?
+                audio = torch.ShortTensor(buf).to(device) 
                 audio = audio.float().div_(32768.0)
 
+                # reset buffer
+                buf[0:(in_len-end)] = data[end:]
+                count = buf_end = len(data) - end
+                #print("remaining: ", buf_end)
+
+                # predict and convertto midi
                 predictions = transcribe(model, audio, melspectrogram)
                 messages = to_midi(predictions, onset_threshold, frame_threshold)
                 if len(messages) > 0:
