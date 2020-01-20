@@ -42,23 +42,7 @@ def int_or_str(text):
     except ValueError:
         return text
 
-try:
-    columns, _ = shutil.get_terminal_size()
-except AttributeError:
-    columns = 80
 
-
-# Create a nice output gradient using ANSI escape sequences.
-# Stolen from https://gist.github.com/maurisvh/df919538bcef391bc89f
-colors = 30, 34, 35, 91, 93, 97
-chars = ' :%#\t#%:'
-gradient = []
-for bg, fg in zip(colors, colors[1:]):
-    for char in chars:
-        if char == '\t':
-            bg, fg = fg, bg
-        else:
-            gradient.append('\x1b[{};{}m{}'.format(fg, bg + 10, char))
 
 class Output:
     def __init__(self):
@@ -117,23 +101,6 @@ async def inputstream_generator(channels=1, **kwargs):
         while True:
             indata, frame_count, status = await q_in.get()
             yield indata, frame_count, status
-
-
-async def ascii_spectrogram(fftsize, gain, low_bin, columns, **kwargs):
-    """Show ASCII spectrogram of the audio input."""
-    async for indata, status in inputstream_generator(**kwargs):
-        if status:
-            text = ' ' + str(status) + ' '
-            print('\x1b[34;40m', text.center(columns, '#'),
-                  '\x1b[0m', sep='')
-        if any(indata):
-            magnitude = np.abs(np.fft.rfft(indata[:, 0], n=fftsize))
-            magnitude *= gain / fftsize
-            line = (gradient[int(np.clip(x, 0, 1) * (len(gradient) - 1))]
-                    for x in magnitude[low_bin:low_bin + columns])
-            print(*line, sep='', end='\x1b[0m\n')
-        else:
-            print('no input')
 
 
 async def transcribe_frame(model, window, onset_threshold, frame_threshold, device, output, **kwargs):
@@ -202,6 +169,7 @@ async def transcribe_frame(model, window, onset_threshold, frame_threshold, devi
             if now - last_update > 10:
                 last_update = now
                 print('no input')
+
 
 async def wait_for_input():
     response = await ainput('')
@@ -299,17 +267,18 @@ async def main(list_devices=None, audio_device=None,
                     frame_threshold=kwargs['frame_threshold'],
                     device=ml_device,
                     output=output_handler))
-            input_task = asyncio.create_task(wait_for_input())
+            #input_task = asyncio.create_task(wait_for_input())
 
             print("Listening on", audio_input_info['name'] ,"...")
 
             try:
-                result, ok = await wait_first(audio_task, input_task)
+                #result, ok = await wait_first(audio_task, input_task)
+                result, ok = await audio_task
                 if ok == False:
                     sys.exit()
-                for key, value in result.items():
-                    if key == 'gain':
-                        gain *= value
+                # for key, value in result.items():
+                #     if key == 'gain':
+                #         gain *= value
             except asyncio.CancelledError:
                 print('\nListening cancelled')
                 return
@@ -378,30 +347,21 @@ if __name__ == "__main__":
 
     # model args
     parser.add_argument('model_file', nargs='?', type=str, default=None)
-    parser.add_argument('--save-path', type=str, default='.')
     parser.add_argument('-w', '--window', default=WINDOW_LENGTH, type=int)
     parser.add_argument('--onset-threshold', default=0.5, type=float)
     parser.add_argument('--frame-threshold', default=0.5, type=float)
     parser.add_argument('--ml-device', dest='ml_device', default='cuda' if torch.cuda.is_available() else 'cpu')
-    parser.add_argument('--checkpoint', default=None, type=int)
 
-    # spectrogram args
+    # audio args
     parser.add_argument('-l', '--list-devices', action='store_true',
                         help='list audio devices and exit')
-    parser.add_argument('-b', '--block-duration', type=float,
-                        metavar='DURATION', default=50,
-                        help='block size (default %(default)s milliseconds)')
-    parser.add_argument('-c', '--columns', type=int, default=columns,
-                        help='width of spectrogram')
-    
-    # audio args
     parser.add_argument('-d', '--audio-device', type=int_or_str, dest='audio_device',
                         help='input device (numeric ID or substring)')
-    parser.add_argument('-g', '--gain', type=float, default=10,
-                        help='initial gain factor (default %(default)s)')
-    parser.add_argument('-r', '--range', dest='freq_range', type=float, nargs=2,
-                        metavar=('LOW', 'HIGH'), default=DEFAULT_FREQ_RANGE,
-                        help='frequency range (default %(default)s Hz)')
+    # parser.add_argument('-g', '--gain', type=float, default=10,
+    #                     help='initial gain factor (default %(default)s)')
+    # parser.add_argument('-r', '--range', dest='freq_range', type=float, nargs=2,
+    #                     metavar=('LOW', 'HIGH'), default=DEFAULT_FREQ_RANGE,
+    #                     help='frequency range (default %(default)s Hz)')
     
     # midi output args
     parser.add_argument('-p', '--port', type=str, dest='midi_port',
