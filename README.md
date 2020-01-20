@@ -74,7 +74,7 @@ pip install -r requirements.txt
 
 You will need to set up a synth and generally for testing you will need a virtual mic that you can send audio files to. Instructions for this are lengthy and complicated and depend on OS.
 
-For Ubuntu 18.04 soemthing like this may work:
+For Ubuntu 18.04 something like this may work:
 
 #### Midi playback
 
@@ -176,7 +176,7 @@ python realtime_transcribe.py -l
 
 # on my machine loopback was card 2
 # for some reason the first loopback device doesn't work well, but the second does
-$ ffmpeg -re -i ~/Music/piano_48000rate.wav -f s161e -f alsa hw:2,1
+ffmpeg -re -i ~/Music/piano_48000rate.wav -f s161e -f alsa hw:2,1
 ```
 
 #### Putting it all together:
@@ -193,7 +193,7 @@ python realtime_transcribe.py -l
 python realtime_transcribe.py -d 7 -p 129:0 models/uni/model-1000000.pt
 
 # in tab 3:
-$ ffmpeg -re -i ~/Music/piano_48000rate.wav -f s161e -f alsa hw:2,1
+ffmpeg -re -i ~/Music/piano_48000rate.wav -f s161e -f alsa hw:2,1
 ```
 
 
