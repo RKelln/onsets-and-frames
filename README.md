@@ -64,7 +64,7 @@ NOTE: Uses python 3.7, thus for conda install something like this:
 ```bash
 conda create -n py3_onsets python=3.7
 conda activate py3_onsets
-conda install pytorch torchvision cudatoolkit=10.1 -c pytorch
+conda install pytorch=1.3.1 torchvision=0.4.2 cudatoolkit=10.1 -c pytorch
 git clone https://github.com/RKelln/onsets-and-frames.git
 cd onsets-and-frames
 # currently realtime code lives in the realtime branch:
@@ -79,10 +79,11 @@ For Ubuntu 18.04 soemthing like this may work:
 #### Midi playback
 
 References:
-    http://linux-audio.com/TiMidity-howto.html
-    http://tedfelix.com/linux/linux-midi.html
-    https://hatari.tuxfamily.org/doc/midi-linux.txt
-    https://wiki.archlinux.org/index.php/FluidSynth
+
+* http://linux-audio.com/TiMidity-howto.html
+* http://tedfelix.com/linux/linux-midi.html
+* https://hatari.tuxfamily.org/doc/midi-linux.txt
+* https://wiki.archlinux.org/index.php/FluidSynth
 
 ```bash
 sudo apt install fluidsynth fluid-soundfont-gm pmidi alsa-utils
@@ -107,37 +108,38 @@ aconnect -l
 
 #### Fluidsynth 
 
-Fluidsynth needs a few more thing to realy work correctly:
+Fluidsynth needs a few more thing to really work correctly:
+
 1. Create An "audio" Group
 
-  First, let's check to see if your system already has an audio group:
-```bash
-grep audio /etc/group
-> audio:x:29:pulse
-```
+    First, let's check to see if your system already has an audio group:
+    ```bash
+    grep audio /etc/group
+    > audio:x:29:pulse
+    ```
 
-If you see an "audio" line like the one above, then you've already got an audio group and you can skip to Group Limits.
+    If you see an "audio" line like the one above, then you've already got an audio group and you can skip to Group Limits.
 
-If grep didn't find an audio group, add one with groupadd:
-```bash
-sudo groupadd audio
-```
+    If grep didn't find an audio group, add one with groupadd:
+    ```bash
+    sudo groupadd audio
+    ```
 
 2. Group Limits
 
-The limits for the audio group can usually be found in `/etc/security/limits.d/audio.conf`. Check to see if that file exists on your system. If not, create one. You might need to create the `limits.d` directory
+    The limits for the audio group can usually be found in `/etc/security/limits.d/audio.conf`. Check to see if that file exists on your system. If not, create one. You might need to create the `limits.d` directory
 
-Then create the audio.conf file in there. I usually use nano:
-```bash
-sudo nano /etc/security/limits.d/audio.conf
-```
+    Then create the audio.conf file in there. I usually use nano:
+    ```bash
+    sudo nano /etc/security/limits.d/audio.conf
+    ```
 
-And add the following lines:
-```
-@audio   -  rtprio     95
-@audio   -  memlock    unlimited
-#@audio   -  nice       -19
-```
+    And add the following lines:
+    ```
+    @audio   -  rtprio     95
+    @audio   -  memlock    unlimited
+    #@audio   -  nice       -19
+    ```
 
 
 Commands in fluidsynth:
@@ -181,7 +183,7 @@ $ ffmpeg -re -i ~/Music/piano_48000rate.wav -f s161e -f alsa hw:2,1
 ```bash    
 # in tab 1 start fluidsynth:
 fluidsynth -a alsa -l -o audio.period-size=128  /usr/share/sounds/sf2/FluidR3_GM.sf2
-# note the port forfluidsynth
+# note the port for fluidsynth
 aconnect -l
 
 # in tab 2: get the device number for the virtual mic (what is mapped to hw:2,1)
