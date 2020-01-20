@@ -62,11 +62,12 @@ for bg, fg in zip(colors, colors[1:]):
 
 class Output:
     def __init__(self):
-        pass
+        self.start = time.monotonic()
 
-    def send(self, messages):
-        if len(messages) > 0:
-            print(messages)
+    async def send(self, messages):
+        ms_since_start = int(1000 * (time.monotonic() - self.start))
+        for m in messages:
+            print('{:8d}> {}'.format(ms_since_start, m))
 
     def close(self):
         pass
@@ -81,15 +82,15 @@ class Output:
 class MidiOutput(Output):
     # NOTE: midi channels indexed from 1-16 but mido uses 0-15
     def __init__(self, midi_port, midi_channel):
-        self.start = time.monotonic()
+        super().__init__()
         self.port_name = midi_port
         self.channel = min(15, max(0, midi_channel - 1))
 
-    def send(self, messages):
+    async def send(self, messages):
         ms_since_start = int(1000 * (time.monotonic() - self.start))
         for m in messages:
             m.channel = self.channel
-            print('{:8d}: {:<12} >'.format(ms_since_start, self.port_name[:12]), m)
+            print('{:8d}: {:<12}> {}'.format(ms_since_start, self.port_name[:12], m))
             self.port.send(m)
 
     def close(self):
@@ -174,7 +175,7 @@ async def transcribe_frame(model, window, onset_threshold, frame_threshold, devi
                 predictions = transcribe(model, audio, melspectrogram)
                 messages = to_midi(predictions, onset_threshold, frame_threshold)
                 if len(messages) > 0:
-                    output.send(messages)
+                    await output.send(messages)
         else:
             now = time.monotonic() 
             if now - last_update > 10:
