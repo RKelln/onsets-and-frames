@@ -18,7 +18,7 @@ import shutil
 import sys
 import time
 
-from aioconsole import ainput
+#from aioconsole import ainput
 from mir_eval.util import midi_to_hz
 from mir_eval.util import hz_to_midi
 import numpy as np
@@ -30,7 +30,7 @@ import rtmidi
 
 from onsets_and_frames import *
 
-usage_line = ' press <enter> to quit, +<enter> or -<enter> to change scaling '
+usage_line = ' press <CTRL-C> to quit '
 
 DEFAULT_FREQ_RANGE = [100, 2000]
 
@@ -41,7 +41,6 @@ def int_or_str(text):
         return int(text)
     except ValueError:
         return text
-
 
 
 class Output:
@@ -171,21 +170,21 @@ async def transcribe_frame(model, window, onset_threshold, frame_threshold, devi
                 print('no input')
 
 
-async def wait_for_input():
-    response = await ainput('')
-    if response in ('', 'q', 'Q'):
-        return None, False
-    result = {'gain': 1.0}
-    for ch in response:
-        if ch == '+':
-            result['gain'] *= 2.
-        elif ch == '-':
-            result['gain'] *= 0.5
-        else:
-            print('\x1b[31;40m', usage_line.center(args.columns, '#'),
-                  '\x1b[0m', sep='')
-            return None, True
-    return result, True
+# async def wait_for_input():
+#     response = await ainput('')
+#     if response in ('', 'q', 'Q'):
+#         return None, False
+#     result = {'gain': 1.0}
+#     for ch in response:
+#         if ch == '+':
+#             result['gain'] *= 2.
+#         elif ch == '-':
+#             result['gain'] *= 0.5
+#         else:
+#             print('\x1b[31;40m', usage_line.center(args.columns, '#'),
+#                   '\x1b[0m', sep='')
+#             return None, True
+#     return result, True
 
 
 async def wait_first(*futures):
