@@ -55,6 +55,148 @@ In order to test on the Maestro dataset's test split instead of the MAPS databas
 python evaluate.py runs/model/model-100000.pt Maestro test
 ```
 
+### Real-time 
+
+WIP: Very experimental and currently non-functional. Some basic install and use instructions:
+
+NOTE: Uses python 3.7, thus for conda install something like this:
+
+```bash
+conda create -n py3_onsets python=3.7
+conda activate py3_onsets
+conda install pytorch torchvision cudatoolkit=10.1 -c pytorch
+git clone https://github.com/RKelln/onsets-and-frames.git
+cd onsets-and-frames
+# currently realtime code lives in the realtime branch:
+git checkout realtime
+pip install -r requirements.txt
+```
+
+You will need to set up a synth and generally for testing you will need a virtual mic that you can send audio files to. Instructions for this are lengthy and complicated and depend on OS.
+
+For Ubuntu 18.04 soemthing like this may work:
+
+#### Midi playback
+
+References:
+    http://linux-audio.com/TiMidity-howto.html
+    http://tedfelix.com/linux/linux-midi.html
+    https://hatari.tuxfamily.org/doc/midi-linux.txt
+    https://wiki.archlinux.org/index.php/FluidSynth
+
+```bash
+sudo apt install fluidsynth fluid-soundfont-gm pmidi alsa-utils
+
+fluidsynth --audio-driver=alsa --midi-driver=alsa_seq /usr/share/sounds/sf2/FluidR3_GM.sf2
+```
+
+This sometimes produces distortion, this seems to help:
+```bash
+fluidsynth -a alsa -l -o audio.period-size=128  /usr/share/sounds/sf2/FluidR3_GM.sf2
+```
+
+See audio hardware:
+```bash
+aplay -l
+```
+
+See midi info:
+```bash
+aconnect -l
+```
+
+#### Fluidsynth 
+
+Fluidsynth needs a few more thing to realy work correctly:
+1. Create An "audio" Group
+
+  First, let's check to see if your system already has an audio group:
+```bash
+grep audio /etc/group
+> audio:x:29:pulse
+```
+
+If you see an "audio" line like the one above, then you've already got an audio group and you can skip to Group Limits.
+
+If grep didn't find an audio group, add one with groupadd:
+```bash
+sudo groupadd audio
+```
+
+2. Group Limits
+
+The limits for the audio group can usually be found in `/etc/security/limits.d/audio.conf`. Check to see if that file exists on your system. If not, create one. You might need to create the `limits.d` directory
+
+Then create the audio.conf file in there. I usually use nano:
+```bash
+sudo nano /etc/security/limits.d/audio.conf
+```
+
+And add the following lines:
+```
+@audio   -  rtprio     95
+@audio   -  memlock    unlimited
+#@audio   -  nice       -19
+```
+
+
+Commands in fluidsynth:
+
+List instruments:
+```
+> inst 0
+```
+
+Change instrument on channel:
+```
+> select 0 0 0 73
+```
+`select <chan> <sfont> <bank> <preset>`
+
+    
+#### Create a virtual mic
+
+For this you probably need to create a wav file with a sample rate of 48000 (loopback wants that rate for some reason). Find a short bit of piano music, then convert to 48000 sample rate:
+
+```bash
+sox ~/Music/test_piano.wav -r 48000 ~/Music/piano_48000rate.wav
+```
+
+```bash
+# create loopback
+sudo modprobe snd-aloop
+
+# check on audio devices:
+aplay -l
+
+# or:
+python realtime_transcribe.py -l
+
+# on my machine loopback was card 2
+# for some reason the first loopback device doesn't work well, but the second does
+$ ffmpeg -re -i ~/Music/piano_48000rate.wav -f s161e -f alsa hw:2,1
+```
+
+#### Putting it all together:
+```bash    
+# in tab 1 start fluidsynth:
+fluidsynth -a alsa -l -o audio.period-size=128  /usr/share/sounds/sf2/FluidR3_GM.sf2
+# note the port forfluidsynth
+aconnect -l
+
+# in tab 2: get the device number for the virtual mic (what is mapped to hw:2,1)
+python realtime_transcribe.py -l
+
+# -d for loopback device index, -p for fluidsynth port and channel:
+python realtime_transcribe.py -d 7 -p 129:0 models/uni/model-1000000.pt
+
+# in tab 3:
+$ ffmpeg -re -i ~/Music/piano_48000rate.wav -f s161e -f alsa hw:2,1
+```
+
+
+
+
 ## Implementation Details
 
 This implementation contains a few of the additional improvements on the model that were reported in the Maestro paper, including:
