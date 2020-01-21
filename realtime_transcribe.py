@@ -31,8 +31,7 @@ from onsets_and_frames import *
 
 usage_line = ' press <CTRL-C> to quit '
 
-DEFAULT_FREQ_RANGE = [100, 2000]
-
+WINDOW_LENGTH = 1024
 
 def int_or_str(text):
     """Helper function for argument parsing."""
@@ -107,14 +106,23 @@ async def transcribe_frame(model, window, onset_threshold, frame_threshold, devi
     # note: WINDOW_LENGTH = 2048, but creates a lot of latency, 
     # smaller than 1024 doesn't have the frequency resolution for mel
     # 1024 seems the sweet spot but currently much worse accuracy than 2048
-    window_length = WINDOW_LENGTH 
-    buf = np.zeros(window_length, dtype='int16')
-    buf_end = 0
+    buffer_len = WINDOW_LENGTH
+    buf = np.zeros(WINDOW_LENGTH, dtype='int16')
+    buf_window_start = buffer_len - window
+    buf_end = buf_window_start
     count = 0
 
-    print("window: ", window,  100 * window / window_length, "%")
+    # Buffer looks like this:
+    # /------------- buffer_len ----------------\
+    #                              /-- window --\
+    # [  previously predicted data |  new input ]
+    #
+    # Each window frames of data we predict and roll the data one window.
+    # We then need to remove re-predicted messages.
 
-    melspectrogram = MelSpectrogram(N_MELS, SAMPLE_RATE, window_length, HOP_LENGTH, mel_fmin=MEL_FMIN, mel_fmax=MEL_FMAX)
+    print("window: ", window,  100 * window / buffer_len, "%")
+
+    melspectrogram = MelSpectrogram(N_MELS, SAMPLE_RATE, buffer_len, HOP_LENGTH, mel_fmin=MEL_FMIN, mel_fmax=MEL_FMAX)
     melspectrogram.to(device)
 
     async for indata, frame_count, status in inputstream_generator(**kwargs):
@@ -130,7 +138,7 @@ async def transcribe_frame(model, window, onset_threshold, frame_threshold, devi
             #print(count, frame_count, indata.shape) #, buf.shape, buf.maxlen)
                 
             if count < window:
-                # copy into buffer
+                # append into buffer
                 # TODO: check for overruns
                 buf[buf_end:(buf_end+in_len)] = data
                 buf_end += in_len
@@ -143,25 +151,31 @@ async def transcribe_frame(model, window, onset_threshold, frame_threshold, devi
                 #print(int(1000 * (now - last_update)), "ms between updates")
                 last_update = now
 
-                # fill up buffer to window
-                end = window - buf_end
-                buf[buf_end:window] = data[:end]
-                #print("fill to window: ", buf_end, end)
+                # fill up buffer
+                end = buffer_len - buf_end
+                buf[buf_end:buffer_len] = data[:end]
+                #print("fill buffer: ", buf_end, end, buffer_len)
 
-                # TODO: does this copy buf?
+                # note: buf is copied
                 audio = torch.ShortTensor(buf).to(device) 
                 audio = audio.float().div_(32768.0)
 
-                # reset buffer
-                buf[0:(in_len-end)] = data[end:]
-                count = buf_end = len(data) - end
-                #print("remaining: ", buf_end)
-
-                # predict and convertto midi
+                # predict and convert to midi
                 predictions = transcribe(model, audio, melspectrogram)
                 messages = to_midi(predictions, onset_threshold, frame_threshold)
                 if len(messages) > 0:
                     await output.send(messages)
+
+                # reset buffer
+                count = in_len - end
+                buf_end = buf_window_start + count
+                if window < buffer_len:
+                    # TODO: roll or copy part of the array?
+                    buf = np.roll(buf, -window)
+                buf[buf_window_start:buf_end] = data[end:]
+                #print("remaining: ", count)
+                #print("buf", buf.shape, buf)
+
         else:
             now = time.monotonic() 
             if now - last_update > 10:
@@ -202,9 +216,6 @@ async def wait_first(*futures):
 
 
 async def main(list_devices=None, audio_device=None, 
-    freq_range=DEFAULT_FREQ_RANGE, 
-    block_duration=10,
-    columns=80,
     gain=10,
     model_file = None,
     ml_device = 'cpu',
@@ -237,6 +248,10 @@ async def main(list_devices=None, audio_device=None,
         print("Midi output:")
         print(midi_port, "channel:", midi_channel)
         print("Model file:", model_file)
+
+    if kwargs['window'] > WINDOW_LENGTH:
+        print("window must be <=", WINDOW_LENGTH)
+        parser.exit(1)
 
     # construct output 
     if midi_port is None:
@@ -310,7 +325,6 @@ def to_midi(predictions, onset_threshold, frame_threshold):
     pitches, intervals, velocities = extract_notes(predictions['onset'], predictions['frame'], predictions['velocity'], onset_threshold, frame_threshold)
 
     scaling = HOP_LENGTH / SAMPLE_RATE
-
     intervals = (intervals * scaling).reshape(-1, 2)
     pitches = np.array([midi_to_hz(MIN_MIDI + midi) for midi in pitches])
 
@@ -345,7 +359,7 @@ if __name__ == "__main__":
 
     # model args
     parser.add_argument('model_file', nargs='?', type=str, default=None)
-    parser.add_argument('-w', '--window', default=WINDOW_LENGTH, type=int)
+    parser.add_argument('-w', '--window', default=256, type=int)
     parser.add_argument('--onset-threshold', default=0.5, type=float)
     parser.add_argument('--frame-threshold', default=0.5, type=float)
     parser.add_argument('--ml-device', dest='ml_device', default='cuda' if torch.cuda.is_available() else 'cpu')

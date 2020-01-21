@@ -3,7 +3,8 @@ from torch import nn
 
 
 class BiLSTM(nn.Module):
-    inference_chunk_length = 512
+    # FIXME: was 512, ideally this is 1 for real-time, what can compute handle?
+    inference_chunk_length = 1
 
     def __init__(self, input_features, recurrent_features, bidirectional=True):
         super().__init__()
