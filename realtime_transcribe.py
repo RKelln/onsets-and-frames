@@ -4,9 +4,14 @@ Realtime audio piano audio transcription.
 
 You need Python 3.7 or newer to run this.
 
-"""
+List audio devices:
 
-# https://magic.io/blog/uvloop-blazing-fast-python-networking/
+    $ python realtime_transcribe.py -l
+
+Example:
+
+    $ python realtime_transcribe.py -d 7 -p 129:0 models/uni/model-1000000.pt
+"""
 
 import argparse
 import asyncio
@@ -31,6 +36,9 @@ from onsets_and_frames import *
 
 usage_line = ' press <CTRL-C> to quit '
 
+# Note: WINDOW_LENGTH = 2048, but creates a lot of latency,
+# smaller than 1024 doesn't have the frequency resolution for mel
+# 1024 seems the sweet spot
 WINDOW_LENGTH = 1024
 
 def int_or_str(text):
@@ -62,17 +70,26 @@ class Output:
 
 class MidiOutput(Output):
     # NOTE: midi channels indexed from 1-16 but mido uses 0-15
-    def __init__(self, midi_port, midi_channel):
+    def __init__(self, midi_port, midi_channel, save_to=None, verbose=False):
         super().__init__()
+        self.verbose = verbose
         self.port_name = midi_port
         self.channel = min(15, max(0, midi_channel - 1))
+        self.midi_file = save_to
+        if save_to:
+            # create midi file to save to, if exists
+            # TODO:
+            self.saved_midi = []
 
     async def send(self, messages):
         ms_since_start = int(1000 * (time.monotonic() - self.start))
         for m in messages:
             m.channel = self.channel
-            print('{:8d}: {:<12}> {}'.format(ms_since_start, self.port_name[:12], m))
             self.port.send(m)
+            if self.verbose:
+                print('{:8d}: {:<12}> {}'.format(ms_since_start, self.port_name[:12], m))
+        if self.midi_file:
+            self.saved_midi.extend(messages)
 
     def close(self):
         self.port.close()
@@ -100,17 +117,16 @@ async def inputstream_generator(channels=1, **kwargs):
             yield indata, frame_count, status
 
 
-async def transcribe_frame(model, window, onset_threshold, frame_threshold, device, output, **kwargs):
+async def transcribe_frame(model, window, onset_threshold, frame_threshold, device, output, verbose=False, **kwargs):
 
     last_update = time.monotonic()
-    # note: WINDOW_LENGTH = 2048, but creates a lot of latency, 
-    # smaller than 1024 doesn't have the frequency resolution for mel
-    # 1024 seems the sweet spot but currently much worse accuracy than 2048
     buffer_len = WINDOW_LENGTH
     buf = np.zeros(WINDOW_LENGTH, dtype='int16')
     buf_window_start = buffer_len - window
     buf_end = buf_window_start
     count = 0
+    if verbose:
+        print(f"Window size: {window} {100 * window / buffer_len}% of buffer")
 
     # Buffer looks like this:
     # /------------- buffer_len ----------------\
@@ -118,25 +134,28 @@ async def transcribe_frame(model, window, onset_threshold, frame_threshold, devi
     # [  previously predicted data |  new input ]
     #
     # Each window frames of data we predict and roll the data one window.
-    # We then need to remove re-predicted messages.
-
-    print("window: ", window,  100 * window / buffer_len, "%")
+    # TODO: We then need to remove re-predicted messages.
 
     melspectrogram = MelSpectrogram(N_MELS, SAMPLE_RATE, buffer_len, HOP_LENGTH, mel_fmin=MEL_FMIN, mel_fmax=MEL_FMAX)
     melspectrogram.to(device)
+
+    # update frequency information when verbose = True
+    update_report_freq = 100
+    update_durations = [0 for _ in range(update_report_freq)]
+    update_count = 0
 
     async for indata, frame_count, status in inputstream_generator(**kwargs):
         if status:
             text = ' ' + str(status) + ' '
             print('\x1b[34;40m', text.center(columns, '#'),
                   '\x1b[0m', sep='')
-        
+
         data = indata[:, 0]
         in_len = len(data)
         if any(data):
             count += frame_count
             #print(count, frame_count, indata.shape) #, buf.shape, buf.maxlen)
-                
+
             if count < window:
                 # append into buffer
                 # TODO: check for overruns
@@ -145,11 +164,18 @@ async def transcribe_frame(model, window, onset_threshold, frame_threshold, devi
                 #print("copy into buffer", buf_end, buf)
 
             # FIXME: We place the buffer at the start of the window, and it can be smaller,
-            #        so that the latency is reduced 
+            #        so that the latency is reduced
             else:
-                now = time.monotonic()
-                #print(int(1000 * (now - last_update)), "ms between updates")
-                last_update = now
+                # track updates
+                if verbose:
+                    now = time.monotonic()
+                    update_durations[update_count] = now - last_update
+                    last_update = now
+                    update_count += 1
+                    if update_count >= update_report_freq:
+                        update_count = 0
+                        avg_update = sum(update_durations) / len(update_durations)
+                        print(int(1000 * avg_update), "ms between updates")
 
                 # fill up buffer
                 end = buffer_len - buf_end
@@ -157,7 +183,7 @@ async def transcribe_frame(model, window, onset_threshold, frame_threshold, devi
                 #print("fill buffer: ", buf_end, end, buffer_len)
 
                 # note: buf is copied
-                audio = torch.ShortTensor(buf).to(device) 
+                audio = torch.ShortTensor(buf).to(device)
                 audio = audio.float().div_(32768.0)
 
                 # predict and convert to midi
@@ -175,12 +201,6 @@ async def transcribe_frame(model, window, onset_threshold, frame_threshold, devi
                 buf[buf_window_start:buf_end] = data[end:]
                 #print("remaining: ", count)
                 #print("buf", buf.shape, buf)
-
-        else:
-            now = time.monotonic() 
-            if now - last_update > 10:
-                last_update = now
-                print('no input')
 
 
 # async def wait_for_input():
@@ -201,8 +221,8 @@ async def transcribe_frame(model, window, onset_threshold, frame_threshold, devi
 
 
 async def wait_first(*futures):
-    ''' Return the result of the first future to finish. Cancel the remaining futures. 
-    From https://stackoverflow.com/questions/31900244/select-first-result-from-two-coroutines-in-asyncio 
+    ''' Return the result of the first future to finish. Cancel the remaining futures.
+    From https://stackoverflow.com/questions/31900244/select-first-result-from-two-coroutines-in-asyncio
     '''
     done, pending = await asyncio.wait(futures,
         return_when=asyncio.FIRST_COMPLETED)
@@ -215,7 +235,7 @@ async def wait_first(*futures):
     return done.pop().result()
 
 
-async def main(list_devices=None, audio_device=None, 
+async def main(list_devices=None, audio_device=None,
     gain=10,
     model_file = None,
     ml_device = 'cpu',
@@ -241,19 +261,11 @@ async def main(list_devices=None, audio_device=None,
 
     audio_input_info = sd.query_devices(audio_device, 'input')
 
-    if verbose:
-        print("Audio input:")
-        print(sd.get_portaudio_version())
-        print(audio_input_info)
-        print("Midi output:")
-        print(midi_port, "channel:", midi_channel)
-        print("Model file:", model_file)
-
     if kwargs['window'] > WINDOW_LENGTH:
         print("window must be <=", WINDOW_LENGTH)
         parser.exit(1)
 
-    # construct output 
+    # construct output
     if midi_port is None:
         output_handler = Output()
     else:
@@ -265,8 +277,23 @@ async def main(list_devices=None, audio_device=None,
             midi_channel = int(match.group(2))
         # find midi port match by name
         midi_port = next((x for x in mido.get_output_names() if r.search(x)), midi_port)
-        print("Output to midi port:", midi_port, "channel:", midi_channel)
-        output_handler = MidiOutput(midi_port, midi_channel)
+        output_handler = MidiOutput(midi_port, midi_channel, verbose=verbose)
+
+    if verbose:
+        a = audio_input_info
+        print(f"""
+    Audio input:
+        {sd.get_portaudio_version()[1]}
+        {a['name']}:
+            Sample rate: {a['default_samplerate']}
+            Input latency: {(a['default_low_input_latency']*1000):.1f} - {(a['default_high_input_latency']*1000):.1f} ms
+            Output latency: {(a['default_low_output_latency']*1000):.1f} - {(a['default_high_output_latency']*1000):.1f} ms
+
+    Midi output:
+        Port: {midi_port} channel: {midi_channel}"
+
+    Model file: {model_file}
+    """)
 
     with torch.no_grad():
         model = torch.load(model_file, map_location=ml_device).eval()
@@ -274,15 +301,17 @@ async def main(list_devices=None, audio_device=None,
         with output_handler:
             audio_task = asyncio.create_task(
                 transcribe_frame(
-                    model=model, 
+                    model=model,
                     window=kwargs['window'],
-                    onset_threshold=kwargs['onset_threshold'], 
+                    onset_threshold=kwargs['onset_threshold'],
                     frame_threshold=kwargs['frame_threshold'],
                     device=ml_device,
-                    output=output_handler))
+                    output=output_handler,
+                    verbose=verbose))
             #input_task = asyncio.create_task(wait_for_input())
 
-            print("Listening on", audio_input_info['name'] ,"...")
+            if verbose:
+                print(f"Listening on {audio_input_info['name']}...")
 
             try:
                 #result, ok = await wait_first(audio_task, input_task)
@@ -293,7 +322,8 @@ async def main(list_devices=None, audio_device=None,
                 #     if key == 'gain':
                 #         gain *= value
             except asyncio.CancelledError:
-                print('\nListening cancelled')
+                if verbose:
+                    print('\nListening cancelled')
                 return
 
 
@@ -354,7 +384,7 @@ def to_midi(predictions, onset_threshold, frame_threshold):
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description=usage_line)
-    
+
     parser.add_argument('-v', '--verbose', action='store_true', help='verbose')
 
     # model args
@@ -374,12 +404,16 @@ if __name__ == "__main__":
     # parser.add_argument('-r', '--range', dest='freq_range', type=float, nargs=2,
     #                     metavar=('LOW', 'HIGH'), default=DEFAULT_FREQ_RANGE,
     #                     help='frequency range (default %(default)s Hz)')
-    
+
     # midi output args
     parser.add_argument('-p', '--port', type=str, dest='midi_port',
                         help='midi port (string)')
     parser.add_argument('--channel', type=int, dest='midi_channel', default=1,
                         help='midi channel (default %(default)s)')
+
+    # testing arguments
+    parser.add_argument('-s', '--save-midi', type=str, default=None, dest='save_midi_file',
+                        help='filename of midi file to save output to')
 
     args = parser.parse_args()
 
