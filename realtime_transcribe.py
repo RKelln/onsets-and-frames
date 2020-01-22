@@ -41,6 +41,8 @@ usage_line = ' press <CTRL-C> to quit '
 # 1024 seems the sweet spot
 WINDOW_LENGTH = 1024
 
+PITCHES = MAX_MIDI - MIN_MIDI
+
 def int_or_str(text):
     """Helper function for argument parsing."""
     try:
@@ -102,6 +104,8 @@ class MidiOutput(Output):
         self.port.close()
 
 
+
+
 async def inputstream_generator(channels=1, **kwargs):
     """Generator that yields blocks of input data as NumPy arrays."""
     q_in = asyncio.Queue()
@@ -138,6 +142,8 @@ async def transcribe_frame(model, window, onset_threshold, frame_threshold, devi
 
     melspectrogram = MelSpectrogram(N_MELS, SAMPLE_RATE, buffer_len, HOP_LENGTH, mel_fmin=MEL_FMIN, mel_fmax=MEL_FMAX)
     melspectrogram.to(device)
+
+    transformer = MidiTransformer(onset_threshold, frame_threshold)
 
     # update frequency information when verbose = True
     update_report_freq = 100
@@ -188,9 +194,10 @@ async def transcribe_frame(model, window, onset_threshold, frame_threshold, devi
 
                 # predict and convert to midi
                 predictions = transcribe(model, audio, melspectrogram)
-                messages = to_midi(predictions, onset_threshold, frame_threshold)
-                if len(messages) > 0:
-                    await output.send(messages)
+                midi_messages = transformer.extract_notes(
+                    predictions['onset'], predictions['frame'], predictions['velocity'])
+                if len(midi_messages) > 0:
+                    await output.send(midi_messages)
 
                 # reset buffer
                 count = in_len - end
@@ -308,13 +315,11 @@ async def main(list_devices=None, audio_device=None,
                     device=ml_device,
                     output=output_handler,
                     verbose=verbose))
-            #input_task = asyncio.create_task(wait_for_input())
 
             if verbose:
                 print(f"Listening on {audio_input_info['name']}...")
 
             try:
-                #result, ok = await wait_first(audio_task, input_task)
                 result, ok = await audio_task
                 if ok == False:
                     sys.exit()
@@ -346,39 +351,78 @@ def transcribe(model, audio, melspectrogram):
     return predictions
 
 
-def to_midi(predictions, onset_threshold, frame_threshold):
-    """
-    pitches: np.ndarray of bin_indices
-    intervals: list of (onset_index, offset_index)
-    velocities: list of velocity values
-    """
-    pitches, intervals, velocities = extract_notes(predictions['onset'], predictions['frame'], predictions['velocity'], onset_threshold, frame_threshold)
+class MidiTransformer:
+    def __init__(self, onset_threshold=0.5, frame_threshold=0.5):
+        self.onsets = None
+        self.frames = None
+        self.onset_threshold = onset_threshold
+        self.frame_threshold = frame_threshold
+        self.active_pitches = np.zeros(PITCHES, dtype='uint8')
 
-    scaling = HOP_LENGTH / SAMPLE_RATE
-    intervals = (intervals * scaling).reshape(-1, 2)
-    pitches = np.array([midi_to_hz(MIN_MIDI + midi) for midi in pitches])
+    def extract_notes(self, onsets, frames, velocity):
+        """
+        Finds the midi notes based on the onsets and frames information
 
-    #ticks_per_second = file.ticks_per_beat * 2.0
-    ticks_per_second = 120
+        Parameters
+        ----------
+        onsets: torch.FloatTensor, shape = [frames, bins]
+        frames: torch.FloatTensor, shape = [frames, bins]
+        velocity: torch.FloatTensor, shape = [frames, bins]
 
-    events = []
-    for i in range(len(pitches)):
-        events.append(dict(type='on', pitch=pitches[i], time=intervals[i][0], velocity=velocities[i]))
-        events.append(dict(type='off', pitch=pitches[i], time=intervals[i][1], velocity=velocities[i]))
-    events.sort(key=lambda row: row['time'])
+        Returns
+        -------
+        midi_messages: list of Midi.Messages
+        """
+        onsets = (onsets > self.onset_threshold).cpu().to(torch.uint8)
+        frames = (frames > self.frame_threshold).cpu().to(torch.uint8)
 
-    last_tick = 0
-    midi_messages = []
-    for event in events:
-        current_tick = event['time'] #int(event['time'] * ticks_per_second)
-        velocity = int(event['velocity'] * 127)
-        if velocity > 127:
-            velocity = 127
-        pitch = int(round(hz_to_midi(event['pitch'])))
-        midi_messages.append(mido.Message('note_' + event['type'], note=pitch, velocity=velocity, time=event['time']))
-        last_tick = current_tick
+        # add saved last frame values
+        if self.onsets is not None:
+            #breakpoint()
+            onsets = torch.cat([self.onsets, onsets[:, :]], dim=0)
+        if self.frames is not None:
+            frames = torch.cat([self.frames, frames[:, :]], dim=0)
 
-    return midi_messages
+        midi_messages = []
+
+        # step through each frame, look for onsets and ends of frames
+        for pitch in range(PITCHES):
+            velocity_samples = []
+            note_on = False
+            note_off = False
+
+            for frame in range(1, onsets.shape[0]):
+                onset = (onsets[frame,pitch].item() - onsets[frame-1,pitch].item()) == 1
+                if onset:
+                    velocity_samples.append(velocity[frame-1,pitch].item())
+                    if not self.active_pitches[pitch]:
+                        note_on = True
+                        self.active_pitches[pitch] = 1
+                else:
+                    off = frames[frame-1,pitch].item() - frames[frame,pitch].item() 
+                    if off == 0 and self.active_pitches[pitch]:
+                        velocity_samples.append(velocity[frame-1,pitch].item())
+                    elif off == 1 and self.active_pitches[pitch]:
+                        note_off = True
+                        self.active_pitches[pitch] = 0
+
+            note = MIN_MIDI + pitch
+
+            if note_on:
+                v = min(127, int(np.mean(velocity_samples) * 127))
+                midi_messages.append(
+                    mido.Message('note_on', note=note, velocity=v))
+
+            if note_off:
+                midi_messages.append(
+                    mido.Message('note_off', note=note))
+
+
+        # store last frames for next time
+        self.onsets = onsets[-1:, :]
+        self.frames = frames[-1:, :]
+
+        return midi_messages
 
 
 if __name__ == "__main__":
