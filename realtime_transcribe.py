@@ -126,6 +126,7 @@ async def transcribe_frame(model, window, onset_threshold, frame_threshold, devi
     last_update = time.monotonic()
     buffer_len = WINDOW_LENGTH
     buf = np.zeros(WINDOW_LENGTH, dtype='int16')
+    temp_buf = np.zeros(WINDOW_LENGTH, dtype='int16')
     buf_window_start = buffer_len - window
     buf_end = buf_window_start
     count = 0
@@ -172,17 +173,6 @@ async def transcribe_frame(model, window, onset_threshold, frame_threshold, devi
             # FIXME: We place the buffer at the start of the window, and it can be smaller,
             #        so that the latency is reduced
             else:
-                # track updates
-                if verbose:
-                    now = time.monotonic()
-                    update_durations[update_count] = now - last_update
-                    last_update = now
-                    update_count += 1
-                    if update_count >= update_report_freq:
-                        update_count = 0
-                        avg_update = sum(update_durations) / len(update_durations)
-                        print(int(1000 * avg_update), "ms between updates")
-
                 # fill up buffer
                 end = buffer_len - buf_end
                 buf[buf_end:buffer_len] = data[:end]
@@ -193,22 +183,37 @@ async def transcribe_frame(model, window, onset_threshold, frame_threshold, devi
                 audio = audio.float().div_(32768.0)
 
                 # predict and convert to midi
+                # approx: 5ms to predict
                 predictions = transcribe(model, audio, melspectrogram)
-                midi_messages = transformer.extract_notes(
-                    predictions['onset'], predictions['frame'], predictions['velocity'])
+                # approx: 2.5ms to extract notes
+                midi_messages = transformer.extract_notes(predictions)
                 if len(midi_messages) > 0:
+                    # approx: < 0.1ms to send
                     await output.send(midi_messages)
 
                 # reset buffer
                 count = in_len - end
                 buf_end = buf_window_start + count
                 if window < buffer_len:
-                    # TODO: roll or copy part of the array?
-                    buf = np.roll(buf, -window)
+                    #buf = np.roll(buf, -window)
+                    # faster than roll (but more memory)
+                    temp_buf[:-window] = buf[window:]
+                    buf = temp_buf
+
                 buf[buf_window_start:buf_end] = data[end:]
                 #print("remaining: ", count)
                 #print("buf", buf.shape, buf)
 
+                # track updates
+                if verbose:
+                    now = time.monotonic()
+                    update_durations[update_count] = now - last_update
+                    last_update = now
+                    update_count += 1
+                    if update_count >= update_report_freq:
+                        update_count = 0
+                        avg_update = sum(update_durations) / len(update_durations)
+                        print(int(1000 * avg_update), "ms between updates")
 
 # async def wait_for_input():
 #     response = await ainput('')
@@ -335,17 +340,13 @@ async def main(list_devices=None, audio_device=None,
 def transcribe(model, audio, melspectrogram):
 
     mel = melspectrogram(audio.reshape(-1, audio.shape[-1])[:, :-1]).transpose(-1, -2)
-    start = time.monotonic()
     onset_pred, offset_pred, _, frame_pred, velocity_pred = model(mel)
-    end = time.monotonic()
 
     predictions = {
         'onset': onset_pred.reshape((onset_pred.shape[1], onset_pred.shape[2])),
-        'offset': offset_pred.reshape((offset_pred.shape[1], offset_pred.shape[2])),
+        #'offset': offset_pred.reshape((offset_pred.shape[1], offset_pred.shape[2])),
         'frame': frame_pred.reshape((frame_pred.shape[1], frame_pred.shape[2])),
-        'velocity': velocity_pred.reshape((velocity_pred.shape[1], velocity_pred.shape[2])),
-        'start_time': start,
-        'end_time': end,
+        'velocity': velocity_pred.reshape((velocity_pred.shape[1], velocity_pred.shape[2]))
     }
     #print("predict time:", 1000 * (end-start))
     return predictions
@@ -357,65 +358,77 @@ class MidiTransformer:
         self.frames = None
         self.onset_threshold = onset_threshold
         self.frame_threshold = frame_threshold
-        self.active_pitches = np.zeros(PITCHES, dtype='uint8')
+        self.active_pitches = np.zeros(PITCHES, dtype='uint16')
 
-    def extract_notes(self, onsets, frames, velocity):
+    def extract_notes(self, predictions):
         """
         Finds the midi notes based on the onsets and frames information
 
         Parameters
         ----------
-        onsets: torch.FloatTensor, shape = [frames, bins]
-        frames: torch.FloatTensor, shape = [frames, bins]
-        velocity: torch.FloatTensor, shape = [frames, bins]
+        predictions: dict containing:
+            onset: torch.FloatTensor, shape = [frames, bins]
+            offset: torch.FloatTensor, shape = [frames, bins]
+            frame: torch.FloatTensor, shape = [frames, bins]
+            velocity: torch.FloatTensor, shape = [frames, bins]
 
         Returns
         -------
         midi_messages: list of Midi.Messages
         """
-        onsets = (onsets > self.onset_threshold).cpu().to(torch.uint8)
-        frames = (frames > self.frame_threshold).cpu().to(torch.uint8)
+        onsets = (predictions['onset'] > self.onset_threshold).cpu().to(torch.uint8)
+        #offsets = (predictions['offset'] > self.onset_threshold).cpu().to(torch.uint8)
+        frames = (predictions['frame'] > self.frame_threshold).cpu().to(torch.uint8)
+        velocity = predictions['velocity']
 
         # add saved last frame values
         if self.onsets is not None:
-            #breakpoint()
             onsets = torch.cat([self.onsets, onsets[:, :]], dim=0)
         if self.frames is not None:
             frames = torch.cat([self.frames, frames[:, :]], dim=0)
 
         midi_messages = []
 
-        # step through each frame, look for onsets and ends of frames
+        # allow repeat onsets after this many frames
+        # TODO: calculate this and add parameter
+        min_onset_frame_gap = 10
+
+        # TODO: optimize for mostly zero data
+        # step through each new frame, look for onsets and ends of frames
         for pitch in range(PITCHES):
             velocity_samples = []
             note_on = False
             note_off = False
+            note = MIN_MIDI + pitch
 
             for frame in range(1, onsets.shape[0]):
                 onset = (onsets[frame,pitch].item() - onsets[frame-1,pitch].item()) == 1
                 if onset:
-                    velocity_samples.append(velocity[frame-1,pitch].item())
-                    if not self.active_pitches[pitch]:
+                    if self.active_pitches[pitch] == 0 or self.active_pitches[pitch] > min_onset_frame_gap:
                         note_on = True
+                        # NOTE: velocity frame doesn't have additional saved data so frame - 1 is correct
+                        velocity_samples.append(velocity[frame - 1,pitch].item()) 
                         self.active_pitches[pitch] = 1
-                else:
+
+                elif self.active_pitches[pitch]:
                     off = frames[frame-1,pitch].item() - frames[frame,pitch].item() 
-                    if off == 0 and self.active_pitches[pitch]:
-                        velocity_samples.append(velocity[frame-1,pitch].item())
-                    elif off == 1 and self.active_pitches[pitch]:
+                    if off == 0:
+                        self.active_pitches[pitch] += 1 # track number of frames this note has been on
+                        velocity_samples.append(velocity[frame - 1,pitch].item())
+                    elif off == 1:
                         note_off = True
                         self.active_pitches[pitch] = 0
 
-            note = MIN_MIDI + pitch
+                if note_on:
+                    note_on = False
+                    v = min(127, int(np.mean(velocity_samples) * 127))
+                    midi_messages.append(
+                        mido.Message('note_on', note=note, velocity=v))
 
-            if note_on:
-                v = min(127, int(np.mean(velocity_samples) * 127))
-                midi_messages.append(
-                    mido.Message('note_on', note=note, velocity=v))
-
-            if note_off:
-                midi_messages.append(
-                    mido.Message('note_off', note=note))
+                if note_off:
+                    note_off = False
+                    midi_messages.append(
+                        mido.Message('note_off', note=note))
 
 
         # store last frames for next time
