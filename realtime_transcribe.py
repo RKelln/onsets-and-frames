@@ -58,7 +58,7 @@ class Output:
     async def send(self, messages):
         ms_since_start = int(1000 * (time.monotonic() - self.start))
         for m in messages:
-            print('{:8d}> {}'.format(ms_since_start, m))
+            print(f"{ms_since_start:8d}> {m}")
 
     def close(self):
         pass
@@ -79,19 +79,22 @@ class MidiOutput(Output):
         self.channel = min(15, max(0, midi_channel - 1))
         self.midi_file = save_to
         if save_to:
-            # create midi file to save to, if exists
-            # TODO:
-            self.saved_midi = []
+            self.saved_messages = []
+            self.midi_file = os.path.expanduser(self.midi_file)
+            if self.verbose:
+                print(f"Saving to {self.midi_file}")
+            if os.path.exists(self.midi_file):
+                print(f"Warning: {self.midi_file} already exists. Overwriting...")
 
     async def send(self, messages):
-        ms_since_start = int(1000 * (time.monotonic() - self.start))
+        since_start = time.monotonic() - self.start
         for m in messages:
             m.channel = self.channel
             self.port.send(m)
             if self.verbose:
-                print('{:8d}: {:<12}> {}'.format(ms_since_start, self.port_name[:12], m))
-        if self.midi_file:
-            self.saved_midi.extend(messages)
+                print(f"{int(1000 * since_start):8d}: {self.port_name[:12]:<12}> {m}")
+            if self.midi_file:
+                self.saved_messages.append(m.copy(time = since_start))
 
     def close(self):
         self.port.close()
@@ -102,8 +105,24 @@ class MidiOutput(Output):
 
     def __exit__(self, type, value, traceback):
         self.port.close()
+        if self.midi_file:
+            self.save_midi_file(self.midi_file)
 
+    def save_midi_file(self, path):
+        file = mido.MidiFile()
+        track = mido.MidiTrack()
+        file.tracks.append(track)
+        ticks_per_second = file.ticks_per_beat * 2.0
 
+        prev_time = 0
+        for m in self.saved_messages:
+            delta_ticks = int((m.time - prev_time) * ticks_per_second) # convert time to delta ticks
+            track.append(m.copy(time=delta_ticks))
+            prev_time = m.time
+
+        if self.verbose:
+            print(f"Saving midi to {path}")
+        file.save(path)
 
 
 async def inputstream_generator(channels=1, **kwargs):
@@ -254,6 +273,7 @@ async def main(list_devices=None, audio_device=None,
     midi_port = None,
     midi_channel = 1,
     verbose = False,
+    save_midi_file = None,
     **kwargs):
 
     if list_devices:
@@ -289,7 +309,7 @@ async def main(list_devices=None, audio_device=None,
             midi_channel = int(match.group(2))
         # find midi port match by name
         midi_port = next((x for x in mido.get_output_names() if r.search(x)), midi_port)
-        output_handler = MidiOutput(midi_port, midi_channel, verbose=verbose)
+        output_handler = MidiOutput(midi_port, midi_channel, verbose=verbose, save_to=save_midi_file)
 
     if verbose:
         a = audio_input_info
@@ -340,27 +360,27 @@ async def main(list_devices=None, audio_device=None,
 def transcribe(model, audio, melspectrogram):
 
     mel = melspectrogram(audio.reshape(-1, audio.shape[-1])[:, :-1]).transpose(-1, -2)
-    onset_pred, offset_pred, _, frame_pred, velocity_pred = model(mel)
+    onset_pred, _, _, frame_pred, velocity_pred = model(mel)
 
     predictions = {
         'onset': onset_pred.reshape((onset_pred.shape[1], onset_pred.shape[2])),
-        #'offset': offset_pred.reshape((offset_pred.shape[1], offset_pred.shape[2])),
         'frame': frame_pred.reshape((frame_pred.shape[1], frame_pred.shape[2])),
         'velocity': velocity_pred.reshape((velocity_pred.shape[1], velocity_pred.shape[2]))
     }
-    #print("predict time:", 1000 * (end-start))
     return predictions
 
 
 class MidiTransformer:
-    def __init__(self, onset_threshold=0.5, frame_threshold=0.5):
+    def __init__(self, onset_threshold=0.5, frame_threshold=0.5, verbose=False):
         self.onsets = None
         self.frames = None
         self.onset_threshold = onset_threshold
         self.frame_threshold = frame_threshold
         self.active_pitches = np.zeros(PITCHES, dtype='uint16')
+        self.ignore_frames = 0
+        self.verbose = verbose
 
-    def extract_notes(self, predictions):
+    def extract_notes(self, predictions, ignore_frames=0):
         """
         Finds the midi notes based on the onsets and frames information
 
