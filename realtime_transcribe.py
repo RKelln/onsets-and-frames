@@ -40,6 +40,7 @@ usage_line = ' press <CTRL-C> to quit '
 # smaller than 1024 doesn't have the frequency resolution for mel
 # 1024 seems the sweet spot
 WINDOW_LENGTH = 1024
+FRAME_LENGTH = 256
 
 PITCHES = MAX_MIDI - MIN_MIDI
 
@@ -140,30 +141,35 @@ async def inputstream_generator(channels=1, **kwargs):
             yield indata, frame_count, status
 
 
-async def transcribe_frame(model, window, onset_threshold, frame_threshold, device, output, verbose=False, **kwargs):
+async def transcribe_frame(model, output, 
+    window_len=WINDOW_LENGTH, frame_len=FRAME_LENGTH,
+    onset_threshold=0.5, frame_threshold=0.5, 
+    device='cpu', verbose=False, **kwargs):
 
     last_update = time.monotonic()
-    buffer_len = WINDOW_LENGTH
-    buf = np.zeros(WINDOW_LENGTH, dtype='int16')
-    temp_buf = np.zeros(WINDOW_LENGTH, dtype='int16')
-    buf_window_start = buffer_len - window
-    buf_end = buf_window_start
-    count = 0
-    if verbose:
-        print(f"Window size: {window} {100 * window / buffer_len}% of buffer")
 
     # Buffer looks like this:
-    # /------------- buffer_len ----------------\
-    #                              /-- window --\
-    # [  previously predicted data |  new input ]
+    # /------- window_len == buffer_len -----------\
+    #                              /-- frame_len --\
+    # [  previously predicted data |   new input   ]
     #
     # Each window frames of data we predict and roll the data one window.
     # TODO: We then need to remove re-predicted messages.
+    buffer_len = window_len
+    buf = np.zeros(buffer_len, dtype='int16')
+    temp_buf = np.zeros(buffer_len, dtype='int16')
+    buf_frame_start = buffer_len - frame_len
+    buf_end = buf_frame_start
+    count = 0
+    ignore_frames = 0
+    window_to_frame_ratio = window_len // frame_len
+    if verbose:
+        print(f"Window size: {window_len} Frame size: {frame_len} ({100 * frame_len / window_len}%)")
 
-    melspectrogram = MelSpectrogram(N_MELS, SAMPLE_RATE, buffer_len, HOP_LENGTH, mel_fmin=MEL_FMIN, mel_fmax=MEL_FMAX)
+    melspectrogram = MelSpectrogram(N_MELS, SAMPLE_RATE, window_len, frame_len, mel_fmin=MEL_FMIN, mel_fmax=MEL_FMAX)
     melspectrogram.to(device)
 
-    transformer = MidiTransformer(onset_threshold, frame_threshold)
+    transformer = MidiTransformer(onset_threshold, frame_threshold, verbose=verbose)
 
     # update frequency information when verbose = True
     update_report_freq = 100
@@ -178,24 +184,20 @@ async def transcribe_frame(model, window, onset_threshold, frame_threshold, devi
 
         data = indata[:, 0]
         in_len = len(data)
+        assert in_len == frame_count
+
         if any(data):
             count += frame_count
-            #print(count, frame_count, indata.shape) #, buf.shape, buf.maxlen)
 
-            if count < window:
+            if count < frame_len:
                 # append into buffer
-                # TODO: check for overruns
                 buf[buf_end:(buf_end+in_len)] = data
                 buf_end += in_len
-                #print("copy into buffer", buf_end, buf)
 
-            # FIXME: We place the buffer at the start of the window, and it can be smaller,
-            #        so that the latency is reduced
             else:
                 # fill up buffer
                 end = buffer_len - buf_end
                 buf[buf_end:buffer_len] = data[:end]
-                #print("fill buffer: ", buf_end, end, buffer_len)
 
                 # note: buf is copied
                 audio = torch.ShortTensor(buf).to(device)
@@ -204,24 +206,24 @@ async def transcribe_frame(model, window, onset_threshold, frame_threshold, devi
                 # predict and convert to midi
                 # approx: 5ms to predict
                 predictions = transcribe(model, audio, melspectrogram)
-                # approx: 2.5ms to extract notes
-                midi_messages = transformer.extract_notes(predictions)
+                # approx: 2ms to extract notes
+                midi_messages = transformer.extract_notes(predictions, ignore_frames=ignore_frames)
                 if len(midi_messages) > 0:
                     # approx: < 0.1ms to send
                     await output.send(midi_messages)
 
                 # reset buffer
                 count = in_len - end
-                buf_end = buf_window_start + count
-                if window < buffer_len:
-                    #buf = np.roll(buf, -window)
+                buf_end = buf_frame_start + count
+                if frame_len < buffer_len:
+                    #buf = np.roll(buf, -frame_len)
                     # faster than roll (but more memory)
-                    temp_buf[:-window] = buf[window:]
+                    temp_buf[:-frame_len] = buf[frame_len:]
                     buf = temp_buf
+                    if ignore_frames < window_to_frame_ratio - 1:
+                        ignore_frames += 1
 
-                buf[buf_window_start:buf_end] = data[end:]
-                #print("remaining: ", count)
-                #print("buf", buf.shape, buf)
+                buf[buf_frame_start:buf_end] = data[end:]
 
                 # track updates
                 if verbose:
@@ -233,6 +235,7 @@ async def transcribe_frame(model, window, onset_threshold, frame_threshold, devi
                         update_count = 0
                         avg_update = sum(update_durations) / len(update_durations)
                         print(int(1000 * avg_update), "ms between updates")
+
 
 # async def wait_for_input():
 #     response = await ainput('')
@@ -293,8 +296,8 @@ async def main(list_devices=None, audio_device=None,
 
     audio_input_info = sd.query_devices(audio_device, 'input')
 
-    if kwargs['window'] > WINDOW_LENGTH:
-        print("window must be <=", WINDOW_LENGTH)
+    if kwargs['frame'] > kwargs['window']:
+        print(f"frame ({kwargs['frame']}) must be <= window ({kwargs['window']})")
         parser.exit(1)
 
     # construct output
@@ -334,11 +337,12 @@ async def main(list_devices=None, audio_device=None,
             audio_task = asyncio.create_task(
                 transcribe_frame(
                     model=model,
-                    window=kwargs['window'],
+                    output=output_handler,
+                    window_len=kwargs['window'],
+                    frame_len=kwargs['frame'],
                     onset_threshold=kwargs['onset_threshold'],
                     frame_threshold=kwargs['frame_threshold'],
                     device=ml_device,
-                    output=output_handler,
                     verbose=verbose))
 
             if verbose:
@@ -397,21 +401,27 @@ class MidiTransformer:
         midi_messages: list of Midi.Messages
         """
         onsets = (predictions['onset'] > self.onset_threshold).cpu().to(torch.uint8)
-        #offsets = (predictions['offset'] > self.onset_threshold).cpu().to(torch.uint8)
         frames = (predictions['frame'] > self.frame_threshold).cpu().to(torch.uint8)
-        velocity = predictions['velocity']
+        velocity = predictions['velocity'].cpu()
 
         # add saved last frame values
-        if self.onsets is not None:
-            onsets = torch.cat([self.onsets, onsets[:, :]], dim=0)
-        if self.frames is not None:
-            frames = torch.cat([self.frames, frames[:, :]], dim=0)
+        if ignore_frames > 0:
+            self.ignore_frames = ignore_frames
+
+        if self.ignore_frames == 0 and ignore_frames == 0:
+            if self.onsets is not None and self.frames is not None:
+                ignore_frames = 1
+                onsets = torch.cat([self.onsets, onsets[:, :]], dim=0)
+                frames = torch.cat([self.frames, frames[:, :]], dim=0)
+                # duplicate first frame of velocity to match onsets
+                velocity = torch.cat([velocity[:1, :], velocity[:, :]], dim=0)
 
         midi_messages = []
+        last_frame = onsets.shape[0] - 1
 
         # allow repeat onsets after this many frames
         # TODO: calculate this and add parameter
-        min_onset_frame_gap = 10
+        min_onset_frame_gap = last_frame * 5
 
         # TODO: optimize for mostly zero data
         # step through each new frame, look for onsets and ends of frames
@@ -421,23 +431,29 @@ class MidiTransformer:
             note_off = False
             note = MIN_MIDI + pitch
 
-            for frame in range(1, onsets.shape[0]):
+            for frame in range(ignore_frames, onsets.shape[0]):
                 onset = (onsets[frame,pitch].item() - onsets[frame-1,pitch].item()) == 1
+                if self.onsets is not None and frame == last_frame:
+                    if onsets[frame-1,pitch].item() != self.onsets[0,pitch].item():
+                        if self.verbose:
+                            print("onset mismatch", note)
+                        if self.active_pitches[pitch] == 0:
+                            onset = onset or ((onsets[frame,pitch].item() - self.onsets[0,pitch].item()) == 1)
                 if onset:
                     if self.active_pitches[pitch] == 0 or self.active_pitches[pitch] > min_onset_frame_gap:
                         note_on = True
-                        # NOTE: velocity frame doesn't have additional saved data so frame - 1 is correct
-                        velocity_samples.append(velocity[frame - 1,pitch].item()) 
+                        velocity_samples.append(velocity[frame,pitch].item()) 
                         self.active_pitches[pitch] = 1
 
-                elif self.active_pitches[pitch]:
-                    off = frames[frame-1,pitch].item() - frames[frame,pitch].item() 
-                    if off == 0:
-                        self.active_pitches[pitch] += 1 # track number of frames this note has been on
-                        velocity_samples.append(velocity[frame - 1,pitch].item())
-                    elif off == 1:
+                elif self.active_pitches[pitch] > 0:
+                    # to be doubly sure, check last two frames (which will delay offsets by 1 frame)
+                    off = frames[frame,pitch].item() == 0 and frames[frame-1,pitch].item() == 0
+                    if off:
                         note_off = True
                         self.active_pitches[pitch] = 0
+                    else:
+                        velocity_samples.append(velocity[frame,pitch].item())
+                        self.active_pitches[pitch] += 1 # track number of frames this note has been on
 
                 if note_on:
                     note_on = False
@@ -450,8 +466,8 @@ class MidiTransformer:
                     midi_messages.append(
                         mido.Message('note_off', note=note))
 
-
         # store last frames for next time
+        # NOTE: this assumes that ignore_frames only increases
         self.onsets = onsets[-1:, :]
         self.frames = frames[-1:, :]
 
@@ -466,7 +482,8 @@ if __name__ == "__main__":
 
     # model args
     parser.add_argument('model_file', nargs='?', type=str, default=None)
-    parser.add_argument('-w', '--window', default=256, type=int)
+    parser.add_argument('-w', '--window', default=WINDOW_LENGTH, type=int)
+    parser.add_argument('-f', '--frame', default=FRAME_LENGTH, type=int)
     parser.add_argument('--onset-threshold', default=0.5, type=float)
     parser.add_argument('--frame-threshold', default=0.5, type=float)
     parser.add_argument('--ml-device', dest='ml_device', default='cuda' if torch.cuda.is_available() else 'cpu')
