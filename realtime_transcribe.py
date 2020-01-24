@@ -320,14 +320,16 @@ async def main(list_devices=None, audio_device=None,
     Audio input:
         {sd.get_portaudio_version()[1]}
         {a['name']}:
-            Sample rate: {a['default_samplerate']}
-            Input latency: {(a['default_low_input_latency']*1000):.1f} - {(a['default_high_input_latency']*1000):.1f} ms
+            Sample rate:    {a['default_samplerate']}
+            Input latency:  {(a['default_low_input_latency']*1000):.1f} - {(a['default_high_input_latency']*1000):.1f} ms
             Output latency: {(a['default_low_output_latency']*1000):.1f} - {(a['default_high_output_latency']*1000):.1f} ms
 
     Midi output:
         Port: {midi_port} channel: {midi_channel}"
 
     Model file: {model_file}
+        Note on threshold:  {kwargs['onset_threshold']}
+        Note off threshold: {kwargs['frame_threshold']}
     """)
 
     with torch.no_grad():
