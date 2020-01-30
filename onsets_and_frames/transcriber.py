@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from .lstm import BiLSTM
+from .lstm import BiLSTM, RtLSTM
 from .mel import melspectrogram
 
 from .constants import *
@@ -55,8 +55,11 @@ class OnsetsAndFrames(nn.Module):
         super().__init__()
 
         model_size = model_complexity * 16
-        size_divisor = 2 if bidirectional else 1
-        sequence_model = lambda input_size, output_size: BiLSTM(input_size, output_size // size_divisor, bidirectional)
+
+        if bidirectional:
+            sequence_model = lambda input_size, output_size: BiLSTM(input_size, output_size // 2, bidirectional)
+        else: # assume that non-bidirectional models are intended for realtime use
+            sequence_model = lambda input_size, output_size: RtLSTM(input_size, output_size)
 
         self.onset_stack = nn.Sequential(
             ConvStack(input_features, model_size),
