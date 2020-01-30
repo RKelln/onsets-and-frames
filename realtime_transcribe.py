@@ -92,7 +92,8 @@ class MidiOutput(Output):
     async def send(self, messages):
         since_start = time.monotonic() - self.start
         for m in messages:
-            m.channel = self.channel
+            if hasattr(m, 'channel'):
+                m.channel = self.channel
             self.port.send(m)
             if self.verbose:
                 print(f"{int(1000 * since_start):8d}: {self.port_name[:12]:<12}> {m}")
@@ -148,7 +149,7 @@ async def inputstream_generator(channels=1, **kwargs):
 async def transcribe_frame(model, output, 
     window_len=WINDOW_LENGTH, frame_len=FRAME_LENGTH,
     onset_threshold=0.5, frame_threshold=0.5, 
-    device='cpu', verbose=False, gain=1., **kwargs):
+    device='cpu', verbose=False, gain=1., debug=False, **kwargs):
 
     last_update = time.monotonic()
 
@@ -171,9 +172,9 @@ async def transcribe_frame(model, output,
     melspectrogram = MelSpectrogram(N_MELS, SAMPLE_RATE, window_len, frame_len, mel_fmin=MEL_FMIN, mel_fmax=MEL_FMAX, gain=gain)
     melspectrogram.to(device)
 
-    transformer = MidiTransformer(onset_threshold, frame_threshold, verbose=verbose)
+    transformer = MidiTransformer(onset_threshold, frame_threshold, verbose=verbose, debug=debug)
 
-    # update frequency information when verbose = True
+    # update frequency information when debug = True
     report_freq = 100
     update_durations = [0 for _ in range(report_freq)]
     frame_lens = [0 for _ in range(report_freq)]
@@ -233,7 +234,7 @@ async def transcribe_frame(model, output,
             buf[buf_frame_start:buf_end] = data[remaining_buf:]
 
             # track and report
-            if verbose:
+            if debug:
                 frame_lens[report_count] = frame_count
                 now = time.monotonic()
                 update_durations[report_count] = now - last_update
@@ -260,7 +261,7 @@ def transcribe(model, audio, melspectrogram):
 
 
 class MidiTransformer:
-    def __init__(self, onset_threshold=0.5, frame_threshold=0.5, verbose=False):
+    def __init__(self, onset_threshold=0.5, frame_threshold=0.5, verbose=False, debug=False):
         self.onsets = None
         self.frames = None
         self.onset_threshold = onset_threshold
@@ -366,11 +367,15 @@ class MidiTransformer:
         return midi_messages
 
 
-def parse_interactive_input(input, adjustable_params):
+async def parse_interactive_input(input, adjustable_params):
     usage_line = f"""Interactive commands:
     <setting/command> [=] [<value>]
 
     q, quit:\t\texit
+    r, reset:\t\treset midi
+    v, verbose:\t\ttoggle verbose (currently: {adjustable_params['verbose']})
+    d, debug:\t\ttoggle debug mode (currently: {adjustable_params['debug']})
+
     w, window = {adjustable_params['window_len']}:\tset the window size
     f, frame = {adjustable_params['frame_len']}:\tset the frame size 
     g, gain = {adjustable_params['gain']}:\tset the input gain
@@ -391,6 +396,21 @@ def parse_interactive_input(input, adjustable_params):
     if input.startswith('q'):
         print("Quitting...")
         return None, False
+
+    if input.startswith('r'):
+        print("Resetting midi...")
+        await adjustable_params['output'].send([mido.Message('reset')])
+        return None, True
+
+    if input.startswith('v'):
+        print("Toggling verbose...")
+        adjustable_params['verbose'] = not adjustable_params['verbose']
+        return adjustable_params, True
+
+    if input.startswith('d'):
+        print("Toggling debug information...")
+        adjustable_params['debug'] = not adjustable_params['debug']
+        return adjustable_params, True
 
     if value:
         if input.startswith('w'):
@@ -424,7 +444,7 @@ def parse_interactive_input(input, adjustable_params):
 
 async def wait_for_input(adjustable_params):
     response = await ainput('> ')
-    return parse_interactive_input(response, adjustable_params)
+    return await parse_interactive_input(response, adjustable_params)
 
 
 async def wait_first(*futures):
@@ -451,6 +471,7 @@ async def main(list_devices=None, audio_device=None,
     verbose = False,
     save_midi_file = None,
     interactive = False,
+    debug=False,
     **kwargs):
 
     if list_devices:
@@ -544,7 +565,8 @@ async def main(list_devices=None, audio_device=None,
                 frame_threshold=kwargs['frame_threshold'],
                 device=ml_device,
                 gain=gain,
-                verbose=verbose
+                verbose=verbose,
+                debug=debug
             )
 
             while True: # loop because of input task
@@ -565,6 +587,7 @@ async def main(list_devices=None, audio_device=None,
                         sys.exit()
                     if result:
                         transcribe_params = result
+                        output_handler.verbose = transcribe_params['verbose']
 
                 except asyncio.CancelledError:
                     if verbose:
@@ -608,6 +631,8 @@ if __name__ == "__main__":
                         help='filename of midi file to save output to')
     parser.add_argument('-i', '--interactive', action='store_true',
                         help='display interactive console for changing settings')
+    parser.add_argument('--debug', action='store_true',
+                        help='display real-time debugging information')
 
     args = parser.parse_args()
 
