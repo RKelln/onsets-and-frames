@@ -102,9 +102,11 @@ class MidiOutput(Output):
 
     def __enter__(self):
         self.port = mido.open_output(self.port_name)
+        self.port.send(mido.Message('reset'))
         return self
 
     def __exit__(self, type, value, traceback):
+        self.port.send(mido.Message('reset'))
         self.port.close()
         if self.midi_file:
             self.save_midi_file(self.midi_file)
