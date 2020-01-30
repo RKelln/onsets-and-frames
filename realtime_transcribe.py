@@ -23,7 +23,7 @@ import shutil
 import sys
 import time
 
-#from aioconsole import ainput
+from aioconsole import ainput
 from mir_eval.util import midi_to_hz
 from mir_eval.util import hz_to_midi
 import numpy as np
@@ -365,21 +365,67 @@ class MidiTransformer:
 
         return midi_messages
 
-# async def wait_for_input():
-#     response = await ainput('')
-#     if response in ('', 'q', 'Q'):
-#         return None, False
-#     result = {'gain': 1.0}
-#     for ch in response:
-#         if ch == '+':
-#             result['gain'] *= 2.
-#         elif ch == '-':
-#             result['gain'] *= 0.5
-#         else:
-#             print('\x1b[31;40m', usage_line.center(args.columns, '#'),
-#                   '\x1b[0m', sep='')
-#             return None, True
-#     return result, True
+
+def parse_interactive_input(input, adjustable_params):
+    usage_line = f"""Interactive commands:
+    <setting/command> [=] [<value>]
+
+    q, quit:\t\texit
+    w, window = {adjustable_params['window_len']}:\tset the window size
+    f, frame = {adjustable_params['frame_len']}:\tset the frame size 
+    g, gain = {adjustable_params['gain']}:\tset the input gain
+    on, onset = {adjustable_params['onset_threshold']}:\tset the onset threshold
+    of, offset = {adjustable_params['frame_threshold']}:\tset the offset/frame threshold
+    """
+
+    input = input.lower()
+    # remove optional =
+    input = input.replace("=", " ")
+    value = None
+    if len(input) > 0: 
+        # split into command and value
+        result = input.split(None,1)
+        if len(result) == 2:
+            input, value = result[0], result[1]
+    
+    if input.startswith('q'):
+        print("Quitting...")
+        return None, False
+
+    if value:
+        if input.startswith('w'):
+            print("Setting window to", value)
+            adjustable_params['window_len'] = int(value)
+            return adjustable_params, True
+
+        if input.startswith('f'):
+            print("Setting frame to", value)
+            adjustable_params['frame_len'] = int(value)
+            return adjustable_params, True
+
+        if input.startswith('g'):
+            print("Setting gain to", value)
+            adjustable_params['gain'] = float(value)
+            return adjustable_params, True
+
+        if input.startswith('on'):
+            print("Setting onset threshold to", value)
+            adjustable_params['onset_threshold'] = float(value)
+            return adjustable_params, True
+
+        if input.startswith('of'):
+            print("Setting offest/frame threshold to", value)
+            adjustable_params['frame_threshold'] = float(value)
+            return adjustable_params, True
+
+    print(usage_line)
+    return None, True
+
+
+async def wait_for_input(adjustable_params):
+    response = await ainput('> ')
+    return parse_interactive_input(response, adjustable_params)
+
 
 async def wait_first(*futures):
     ''' Return the result of the first future to finish. Cancel the remaining futures.
@@ -404,6 +450,7 @@ async def main(list_devices=None, audio_device=None,
     midi_channel = 0,
     verbose = False,
     save_midi_file = None,
+    interactive = False,
     **kwargs):
 
     if list_devices:
@@ -470,13 +517,6 @@ async def main(list_devices=None, audio_device=None,
                 midi_port = name
                 break
 
-        # check if port is in format: port:channel
-        # r = re.compile(r'(\d+):(\d+)')
-        # match = r.search(midi_port)
-        # if match:
-        #     midi_port = match.group(1) # group(0) is entire match
-        #     midi_channel = int(match.group(2))
-
         output_handler = MidiOutput(midi_port, midi_channel, verbose=verbose, save_to=save_midi_file)
         if verbose:
             print(f"""
@@ -494,32 +534,42 @@ async def main(list_devices=None, audio_device=None,
         model = torch.load(model_file, map_location=ml_device).eval()
 
         with output_handler:
-            audio_task = asyncio.create_task(
-                transcribe_frame(
-                    model=model,
-                    output=output_handler,
-                    window_len=kwargs['window'],
-                    frame_len=kwargs['frame'],
-                    onset_threshold=kwargs['onset_threshold'],
-                    frame_threshold=kwargs['frame_threshold'],
-                    device=ml_device,
-                    gain=gain,
-                    verbose=verbose))
 
-            if verbose:
-                print(f"Listening on {audio_input_info['name']}...")
+            transcribe_params = dict(
+                model=model,
+                output=output_handler,
+                window_len=kwargs['window'],
+                frame_len=kwargs['frame'],
+                onset_threshold=kwargs['onset_threshold'],
+                frame_threshold=kwargs['frame_threshold'],
+                device=ml_device,
+                gain=gain,
+                verbose=verbose
+            )
 
-            try:
-                result, ok = await audio_task
-                if ok == False:
-                    sys.exit()
-                # for key, value in result.items():
-                #     if key == 'gain':
-                #         gain *= value
-            except asyncio.CancelledError:
+            while True: # loop because of input task
+                if interactive:
+                    input_task = asyncio.create_task(wait_for_input(transcribe_params))
+                audio_task = asyncio.create_task(transcribe_frame(**transcribe_params))
+
                 if verbose:
-                    print('\nListening cancelled')
-                return
+                    print(f"Listening on {audio_input_info['name']}...")
+
+                try:
+                    if interactive:
+                        result, ok = await wait_first(audio_task, input_task)
+                    else:
+                        result, ok = await audio_task
+
+                    if ok == False:
+                        sys.exit()
+                    if result:
+                        transcribe_params = result
+
+                except asyncio.CancelledError:
+                    if verbose:
+                        print('\nListening cancelled')
+                    return
 
 
 if __name__ == "__main__":
@@ -556,6 +606,8 @@ if __name__ == "__main__":
     # testing arguments
     parser.add_argument('-s', '--save-midi', type=str, default=None, dest='save_midi_file',
                         help='filename of midi file to save output to')
+    parser.add_argument('-i', '--interactive', action='store_true',
+                        help='display interactive console for changing settings')
 
     args = parser.parse_args()
 
