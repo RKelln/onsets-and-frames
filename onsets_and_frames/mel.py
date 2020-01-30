@@ -70,13 +70,15 @@ class STFT(torch.nn.Module):
 
 class MelSpectrogram(torch.nn.Module):
     def __init__(self, n_mels, sample_rate, filter_length, hop_length,
-                 win_length=None, mel_fmin=0.0, mel_fmax=None):
+                 win_length=None, mel_fmin=0.0, mel_fmax=None, gain=1.):
         super(MelSpectrogram, self).__init__()
         self.stft = STFT(filter_length, hop_length, win_length)
 
         mel_basis = mel(sample_rate, filter_length, n_mels, mel_fmin, mel_fmax, htk=True)
         mel_basis = torch.from_numpy(mel_basis).float()
         self.register_buffer('mel_basis', mel_basis)
+
+        self.gain = gain
 
     def forward(self, y):
         """Computes mel-spectrograms from a batch of waves
@@ -92,6 +94,8 @@ class MelSpectrogram(torch.nn.Module):
 
         magnitudes, phases = self.stft(y)
         magnitudes = magnitudes.data
+        if self.gain != 1.:
+            magnitudes *= self.gain
         mel_output = torch.matmul(self.mel_basis, magnitudes)
         mel_output = torch.log(torch.clamp(mel_output, min=1e-5))
         return mel_output

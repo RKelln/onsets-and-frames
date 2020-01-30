@@ -144,7 +144,7 @@ async def inputstream_generator(channels=1, **kwargs):
 async def transcribe_frame(model, output, 
     window_len=WINDOW_LENGTH, frame_len=FRAME_LENGTH,
     onset_threshold=0.5, frame_threshold=0.5, 
-    device='cpu', verbose=False, **kwargs):
+    device='cpu', verbose=False, gain=1., **kwargs):
 
     last_update = time.monotonic()
 
@@ -270,11 +270,11 @@ async def wait_first(*futures):
 
 
 async def main(list_devices=None, audio_device=None,
-    gain=10,
+    gain=1.,
     model_file = None,
     ml_device = 'cpu',
     midi_port = None,
-    midi_channel = 1,
+    midi_channel = 0,
     verbose = False,
     save_midi_file = None,
     **kwargs):
@@ -345,6 +345,7 @@ async def main(list_devices=None, audio_device=None,
                     onset_threshold=kwargs['onset_threshold'],
                     frame_threshold=kwargs['frame_threshold'],
                     device=ml_device,
+                    gain=gain,
                     verbose=verbose))
 
             if verbose:
@@ -495,8 +496,8 @@ if __name__ == "__main__":
                         help='list audio devices and exit')
     parser.add_argument('-d', '--audio-device', type=int_or_str, dest='audio_device',
                         help='input device (numeric ID or substring)')
-    # parser.add_argument('-g', '--gain', type=float, default=10,
-    #                     help='initial gain factor (default %(default)s)')
+    parser.add_argument('-g', '--gain', type=float, default=1.,
+                        help='initial gain factor (default %(default)s)')
     # parser.add_argument('-r', '--range', dest='freq_range', type=float, nargs=2,
     #                     metavar=('LOW', 'HIGH'), default=DEFAULT_FREQ_RANGE,
     #                     help='frequency range (default %(default)s Hz)')
