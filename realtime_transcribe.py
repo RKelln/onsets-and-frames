@@ -309,6 +309,8 @@ class MidiTransformer:
         -------
         midi_messages: list of Midi.Messages
         """
+        midi_messages = []
+
         onsets = (predictions['onset'] > self.onset_threshold).cpu().to(torch.uint8)
         frames = (predictions['frame'] > self.frame_threshold).cpu().to(torch.uint8)
         velocity = predictions['velocity'].cpu()
@@ -328,26 +330,29 @@ class MidiTransformer:
 
         assert ignore_frames < onsets.shape[0]
 
-        midi_messages = []
         last_frame = onsets.shape[0] - 1
 
         # allow repeat onsets after this many frames
         # TODO: calculate this and add parameter
         min_onset_frame_gap = last_frame * 3
-
-        # TODO: optimize for mostly zero data
+        velocity_samples = []
 
         # step through each new frame, look for onsets and ends of frames
         for pitch in range(PITCHES):
-            velocity_samples = []
+            # optimize for mostly zero data
+            if self.active_pitches[pitch] == 0 and not torch.any(onsets[:,pitch]):
+                continue
+
+            velocity_samples.clear()
             note_on = False
             note_off = False
             note = MIN_MIDI + pitch
+            prev_onset = onsets[ignore_frames-1,pitch].item()
+            prev_off = frames[ignore_frames-1,pitch].item()
 
             for frame in range(ignore_frames, onsets.shape[0]):
                 this = onsets[frame,pitch].item()
-                prev = onsets[frame-1,pitch].item()
-                onset = (this - prev) == 1
+                onset = (this - prev_onset) == 1
                 # check prev frame if looking for onset on the last frame
                 # if not onset and self.onsets is not None and frame == last_frame:
                 #     saved_onset = self.onsets[0,pitch].item()
@@ -357,6 +362,8 @@ class MidiTransformer:
                 #             print(f"onset mismatch({note}) c: {this}, p: {prev} != {saved}")
                 #         if self.active_pitches[pitch] == 0:
                 #             onset = ((this - saved) == 1) or ((prev - this) == 1)
+                prev_onset = this
+
                 if onset:
                     if self.active_pitches[pitch] == 0 or self.active_pitches[pitch] > min_onset_frame_gap:
                         note_on = True
@@ -365,7 +372,10 @@ class MidiTransformer:
 
                 elif self.active_pitches[pitch] > 0:
                     # to be doubly sure, check last two frames (which will delay offsets by 1 frame)
-                    off = frames[frame,pitch].item() == 0 and frames[frame-1,pitch].item() == 0
+                    this = frames[frame,pitch].item()
+                    off = this == 0 and prev_off == 0
+                    prev_off = this
+
                     if off and self.active_pitches[pitch] > min_onset_frame_gap:
                         note_off = True
                         self.active_pitches[pitch] = 0
@@ -382,10 +392,11 @@ class MidiTransformer:
                 midi_messages.append(
                     mido.Message('note_off', note=note))
 
-        # store last frames for next time
+        # store last frames for next time if we aren't ignoring any frames
         # NOTE: this assumes that ignore_frames only increases
-        self.onsets = onsets[-1:, :]
-        self.frames = frames[-1:, :]
+        if self.ignore_frames == 0:
+            self.onsets = onsets[-1:, :]
+            self.frames = frames[-1:, :]
 
         return midi_messages
 
