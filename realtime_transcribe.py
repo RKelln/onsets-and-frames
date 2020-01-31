@@ -186,12 +186,14 @@ async def transcribe_frame(model, output,
     transformer = MidiTransformer(onset_threshold, frame_threshold, verbose=verbose, debug=debug)
 
     # update frequency information when debug = True
-    report_freq = 100
-    update_durations = [0 for _ in range(report_freq)]
-    frame_lens = [0 for _ in range(report_freq)]
+    report_freq = 5. # seconds
+    last_report = time.monotonic() - report_freq + 1. # first report after 1 sec
+    report_len = 400 # how many stats to store (roughly 5 sec at 13ms updates)
+    update_durations = [0 for _ in range(report_len)]
+    frame_lens = [0 for _ in range(report_len)]
+    perf_notes = [0 for _ in range(report_len)]
+    perf_predict = [0 for _ in range(report_len)]
     report_count = 0
-    perf_notes = []
-    perf_predict = []
 
     async for indata, frame_count, status in inputstream_generator(**kwargs):
         if status:
@@ -204,7 +206,7 @@ async def transcribe_frame(model, output,
         assert in_len == frame_count
 
         if in_len > frame_len:
-            print(f"Buffer overrun: {in_len - frame_len}")
+            print(f"Buffer overrun: {in_len - frame_len}. Try --frame={in_len}.")
             in_len = frame_len
             data = data[:frame_len] # TODO: better to keep beginning or end?
 
@@ -238,10 +240,6 @@ async def transcribe_frame(model, output,
                 # approx: < 0.1ms to send
                 await output.send(midi_messages)
 
-            if debug:
-                perf_predict.append(before_notes - before_pred)
-                perf_notes.append(after_notes - before_notes)
-
             # roll buffer 1 frame length
             if frame_len < buffer_len:
                 #buf = np.roll(buf, -frame_len)
@@ -256,21 +254,33 @@ async def transcribe_frame(model, output,
 
             # track and report
             if debug:
-                frame_lens[report_count] = frame_count
                 now = time.monotonic()
+                # loop the stats
+                if report_count >= report_len: report_count = 0
+
                 update_durations[report_count] = now - last_update
+                frame_lens[report_count] = frame_count
+                perf_predict[report_count] = before_notes - before_pred
+                perf_notes[report_count] = after_notes - before_notes
+
                 last_update = now
                 report_count += 1
-                if report_count >= report_freq:
-                    report_count = 0
-                    avg_update = sum(update_durations) / len(update_durations)
-                    avg_lens = sum(frame_lens) / len(frame_lens)
-                    avg_predict = sum(perf_predict) / len(perf_predict)
-                    avg_notes = sum(perf_notes) / len(perf_notes)
-                    perf_predict.clear()
-                    perf_notes.clear()
-                    print(f"Performance durations (ms): predict: {1000 * avg_predict:.2f} notes: {1000 * avg_notes:.2f}")
-                    print(f"""{int(1000 * avg_update)}ms between updates. Avg frame lengths: {avg_lens}""")
+
+                if now - last_report > report_freq:
+                    last_report = now
+                    max_update = max(update_durations) * 1000
+                    avg_update = sum(update_durations) / len(update_durations) * 1000
+                    max_lens = max(frame_lens)
+                    avg_lens = int(sum(frame_lens) / len(frame_lens))
+                    max_predict = max(perf_predict) * 1000
+                    avg_predict = sum(perf_predict) / len(perf_predict) * 1000
+                    max_notes = max(perf_notes) * 1000
+                    avg_notes = sum(perf_notes) / len(perf_notes) * 1000
+                    print(f"""Perf:        <avg> - <max>
+    predict: {avg_predict:>5.2f} - {max_predict:>5.2f} ms
+    notes:   {avg_notes:>5.2f} - {max_notes:>5.2f} ms
+    update:  {avg_update:>5.2f} - {max_update:>5.2f} ms
+    input size: {avg_lens} - {max_lens}""")
 
 
 def transcribe(model, audio, melspectrogram):
