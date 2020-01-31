@@ -187,6 +187,8 @@ async def transcribe_frame(model, output,
     update_durations = [0 for _ in range(report_freq)]
     frame_lens = [0 for _ in range(report_freq)]
     report_count = 0
+    perf_notes = []
+    perf_predict = []
 
     async for indata, frame_count, status in inputstream_generator(**kwargs):
         if status:
@@ -221,13 +223,21 @@ async def transcribe_frame(model, output,
             audio = audio.float().div_(32768.0)
 
             # predict and convert to midi
-            # approx: 5ms to predict
+            # approx: 6ms to predict
+            if debug: before_pred = time.perf_counter()
             predictions = transcribe(model, audio, melspectrogram)
-            # approx: 2ms to extract notes
+            # approx: 1.5ms to extract notes
+            if debug: before_notes = time.perf_counter()
             midi_messages = transformer.extract_notes(predictions, ignore_frames=ignore_frames)
+            if debug: after_notes = time.perf_counter()
+
             if len(midi_messages) > 0:
                 # approx: < 0.1ms to send
                 await output.send(midi_messages)
+
+            if debug:
+                perf_predict.append(before_notes - before_pred)
+                perf_notes.append(after_notes - before_notes)
 
             # roll buffer 1 frame length
             if frame_len < buffer_len:
@@ -252,6 +262,11 @@ async def transcribe_frame(model, output,
                     report_count = 0
                     avg_update = sum(update_durations) / len(update_durations)
                     avg_lens = sum(frame_lens) / len(frame_lens)
+                    avg_predict = sum(perf_predict) / len(perf_predict)
+                    avg_notes = sum(perf_notes) / len(perf_notes)
+                    perf_predict.clear()
+                    perf_notes.clear()
+                    print(f"Performance durations (ms): predict: {1000 * avg_predict:.2f} notes: {1000 * avg_notes:.2f}")
                     print(f"""{int(1000 * avg_update)}ms between updates. Avg frame lengths: {avg_lens}""")
 
 

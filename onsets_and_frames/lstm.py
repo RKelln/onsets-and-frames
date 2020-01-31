@@ -40,18 +40,18 @@ class RtLSTM(nn.Module):
             if size > 0:
                 # rotate saved data
                 self.results.rotate(-1)
-                # TODO: no need to rotate output if redoing it all
+                # FIXME: no need to rotate output if redoing it all
                 #self.output = torch.roll(self.output, -1, 1)
 
             # process the last two frames
-            # TODO: figure out why this doesn't work
+            # FIXME: figure out why this doesn't work
             # if sequence_length > 2 and size >= sequence_length:
             #     size = max(1, size - 2)
             # else:
             #     size = 0
 
             # NOTE: when size = 0, results will all be zero
-            # TODO: change 0 to size, to only redo some of the output/results
+            # FIXME: change 0 to size, to only redo some of the output/results
             for i in range(0, sequence_length):
                 #print(i, size, sequence_length, x.shape)
                 self.output[:, i:i+1, :], self.results[i] = self.rnn(x[:, i:i+1, :], self.results[i-1])
