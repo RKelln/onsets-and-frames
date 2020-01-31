@@ -175,9 +175,12 @@ async def transcribe_frame(model, output,
     buf_end = buf_frame_start
     count = 0
     window_to_frame_ratio = window_len // frame_len
-    ignore_frames = max(0, window_to_frame_ratio - MIN_FRAMES_TO_PROCESS)
+    # mel spectrum always works best with this ration
+    MAGIC_MEL_RATIO = 4
+    hop_length = window_len // MAGIC_MEL_RATIO
+    ignore_frames = max(0, MAGIC_MEL_RATIO - MIN_FRAMES_TO_PROCESS)
 
-    melspectrogram = MelSpectrogram(N_MELS, SAMPLE_RATE, window_len, frame_len, mel_fmin=MEL_FMIN, mel_fmax=MEL_FMAX, gain=gain)
+    melspectrogram = MelSpectrogram(N_MELS, SAMPLE_RATE, window_len, hop_length, mel_fmin=MEL_FMIN, mel_fmax=MEL_FMAX, gain=gain)
     melspectrogram.to(device)
 
     transformer = MidiTransformer(onset_threshold, frame_threshold, verbose=verbose, debug=debug)
