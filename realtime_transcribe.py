@@ -102,14 +102,22 @@ class MidiOutput(Output):
 
     def close(self):
         self.port.close()
+        self.port = None
+
+    def reset(self):
+        if self.port:
+            self.port.send(mido.Message('reset'))
+            # notes not turning off on reset?
+            for note in range(PITCHES):
+                self.port.send(mido.Message('note_off', note = note))
 
     def __enter__(self):
         self.port = mido.open_output(self.port_name)
-        self.port.send(mido.Message('reset'))
+        self.reset()
         return self
 
     def __exit__(self, type, value, traceback):
-        self.port.send(mido.Message('reset'))
+        self.reset()
         self.port.close()
         if self.midi_file:
             self.save_midi_file(self.midi_file)
