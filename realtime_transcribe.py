@@ -353,22 +353,12 @@ class MidiTransformer:
             for frame in range(ignore_frames, onsets.shape[0]):
                 this = onsets[frame,pitch].item()
                 onset = (this - prev_onset) == 1
-                # check prev frame if looking for onset on the last frame
-                # if not onset and self.onsets is not None and frame == last_frame:
-                #     saved_onset = self.onsets[0,pitch].item()
-                #     #saved_frame = self.frames[0,pitch].item()
-                #     if prev != saved_onset:
-                #         if self.verbose:
-                #             print(f"onset mismatch({note}) c: {this}, p: {prev} != {saved}")
-                #         if self.active_pitches[pitch] == 0:
-                #             onset = ((this - saved) == 1) or ((prev - this) == 1)
                 prev_onset = this
 
-                if onset:
-                    if self.active_pitches[pitch] == 0 or self.active_pitches[pitch] > min_onset_frame_gap:
-                        note_on = True
-                        velocity_samples.append(velocity[frame,pitch].item()) 
-                        self.active_pitches[pitch] = 1
+                if onset and (self.active_pitches[pitch] == 0 or self.active_pitches[pitch] > min_onset_frame_gap):
+                    note_on = True
+                    velocity_samples.append(velocity[frame,pitch].item())
+                    self.active_pitches[pitch] = 1
 
                 elif self.active_pitches[pitch] > 0:
                     # to be doubly sure, check last two frames (which will delay offsets by 1 frame)
@@ -401,20 +391,20 @@ class MidiTransformer:
         return midi_messages
 
 
-async def parse_interactive_input(input, adjustable_params):
+async def parse_interactive_input(input, params):
     usage_line = f"""Interactive commands:
     <setting/command> [=] [<value>]
 
     q, quit:\t\texit
     r, reset:\t\treset midi
-    v, verbose:\t\ttoggle verbose (currently: {adjustable_params['verbose']})
-    d, debug:\t\ttoggle debug mode (currently: {adjustable_params['debug']})
+    v, verbose:\t\ttoggle verbose (currently: {params['verbose']})
+    d, debug:\t\ttoggle debug mode (currently: {params['debug']})
 
-    w, window = {adjustable_params['window_len']}:\tset the window size
-    f, frame = {adjustable_params['frame_len']}:\tset the frame size 
-    g, gain = {adjustable_params['gain']}:\tset the input gain
-    on, onset = {adjustable_params['onset_threshold']}:\tset the onset threshold
-    of, offset = {adjustable_params['frame_threshold']}:\tset the offset/frame threshold
+    w, window = {params['window_len']}:\tset the window size
+    f, frame = {params['frame_len']}:\tset the frame size 
+    g, gain = {params['gain']}:\tset the input gain
+    on, onset = {params['onset_threshold']}:\tset the onset threshold
+    of, offset = {params['frame_threshold']}:\tset the offset/frame threshold
     """
 
     input = input.lower()
@@ -433,44 +423,53 @@ async def parse_interactive_input(input, adjustable_params):
 
     if input.startswith('r'):
         print("Resetting midi...")
-        await adjustable_params['output'].send([mido.Message('reset')])
+        await params['output'].send([mido.Message('reset')])
         return None, True
 
     if input.startswith('v'):
         print("Toggling verbose...")
-        adjustable_params['verbose'] = not adjustable_params['verbose']
-        return adjustable_params, True
+        params['verbose'] = not params['verbose']
+        return params, True
 
     if input.startswith('d'):
         print("Toggling debug information...")
-        adjustable_params['debug'] = not adjustable_params['debug']
-        return adjustable_params, True
+        params['debug'] = not params['debug']
+        return params, True
 
-    if value:
-        if input.startswith('w'):
-            print("Setting window to", value)
-            adjustable_params['window_len'] = int(value)
-            return adjustable_params, True
+    try:
+        if value:
+            if input.startswith('w'):
+                params['window_len'] = int(value)
+                ok = check_window_frame(params['window_len'], params['frame_len'])
+                if not ok:
+                    return None, True
+                print("Setting window to", value)
+                return params, True
 
-        if input.startswith('f'):
-            print("Setting frame to", value)
-            adjustable_params['frame_len'] = int(value)
-            return adjustable_params, True
+            if input.startswith('f'):
+                params['frame_len'] = int(value)
+                ok = check_window_frame(params['window_len'], params['frame_len'])
+                if not ok:
+                    return None, True
+                print("Setting frame to", value)
+                return params, True
 
-        if input.startswith('g'):
-            print("Setting gain to", value)
-            adjustable_params['gain'] = float(value)
-            return adjustable_params, True
+            if input.startswith('g'):
+                params['gain'] = float(value)
+                print("Setting gain to", value)
+                return params, True
 
-        if input.startswith('on'):
-            print("Setting onset threshold to", value)
-            adjustable_params['onset_threshold'] = float(value)
-            return adjustable_params, True
+            if input.startswith('on'):
+                params['onset_threshold'] = float(value)
+                print("Setting onset threshold to", value)
+                return params, True
 
-        if input.startswith('of'):
-            print("Setting offest/frame threshold to", value)
-            adjustable_params['frame_threshold'] = float(value)
-            return adjustable_params, True
+            if input.startswith('of'):
+                params['frame_threshold'] = float(value)
+                print("Setting offest/frame threshold to", value)
+                return params, True
+    except:
+        print("Invalid input")
 
     print(usage_line)
     return None, True
@@ -495,6 +494,28 @@ async def wait_first(*futures):
         pass
     return done.pop().result()
 
+
+def check_window_frame(window, frame):
+    """Returns true if dimensions are OK, false otherwise"""
+    if window < 1024:
+        print(f"window ({window}) must be >= 1024")
+        return False
+
+    if window > 2048:
+        print(f"\n \033[1;31;40mWARNING:\033[0m window ({window}) should be <= 2048 for minimal latency")
+    if frame < 256:
+        print(f"\n \033[1;31;40mWARNING:\033[0m frame ({frame}) may cause overruns")
+
+    if frame >= window:
+        print(f"frame ({frame}) must be < window ({window})")
+        return False
+
+    if window % frame != 0:
+        print(f"\n \033[1;31;40mWARNING:\033[0m window ({window}) not divisible by frame ({frame})")
+    if window // frame != 4:
+        print(f"\n \033[1;31;40mWARNING:\033[0m window ({window}) not 4 times frame size ({frame})")
+
+    return True
 
 async def main(list_devices=None, audio_device=None,
     gain=1.,
@@ -524,26 +545,9 @@ async def main(list_devices=None, audio_device=None,
         parser.exit(1)
 
     # window and frame checks and warnings
-    if kwargs['window'] < 1024:
-        print(f"window ({kwargs['window']}) must be >= 1024")
-        parser.exit(1)
-    if kwargs['window'] > 2048:
-        print(f"\n \033[1;31;40mWARNING:\033[0m window ({kwargs['window']}) should be <= 2048 for minimal latency")
-
     if kwargs['frame'] == 0: # default to quarter of window frame size
         kwargs['frame'] = kwargs['window'] // 4;
-    if kwargs['frame'] < 256:
-        print(f"\n \033[1;31;40mWARNING:\033[0m frame ({kwargs['frame']}) is likely too small")
-
-    if kwargs['frame'] >= kwargs['window']:
-        print(f"frame ({kwargs['frame']}) must be < window ({kwargs['window']})")
-        parser.exit(1)
-    if kwargs['window'] % kwargs['frame'] != 0:
-        print(f"window ({kwargs['window']}) must be divisible by frame ({kwargs['frame']})")
-        parser.exit(1)
-    if kwargs['window'] // kwargs['frame'] != 4:
-        print(f"\n \033[1;31;40mWARNING:\033[0m window ({kwargs['window']}) should be 4 times larger than frame ({kwargs['frame']})")
-
+    check_window_frame(kwargs['window'], kwargs['frame'])
 
     audio_input_info = sd.query_devices(audio_device, 'input')
     if verbose:
