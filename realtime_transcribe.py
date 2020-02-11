@@ -10,7 +10,7 @@ List audio devices:
 
 Example:
 
-    $ python realtime_transcribe.py -d 7 -p 129:0 models/uni/model-1000000.pt
+    $ python -O realtime_transcribe.py -d 7 -p 129:0 models/uni/model-1000000.pt
 """
 
 import argparse
@@ -26,6 +26,7 @@ import time
 from aioconsole import ainput
 from mir_eval.util import midi_to_hz
 from mir_eval.util import hz_to_midi
+from pythonosc.udp_client import SimpleUDPClient
 import numpy as np
 import sounddevice as sd
 import soundfile
@@ -33,8 +34,6 @@ import mido
 import rtmidi
 
 from onsets_and_frames import *
-
-usage_line = ' press <CTRL-C> to quit '
 
 # Note: WINDOW_LENGTH = 2048, but creates a lot of latency,
 # smaller than 1024 doesn't have the frequency resolution for mel
@@ -58,10 +57,14 @@ class Output:
     def __init__(self):
         self.start = time.monotonic()
 
-    async def send(self, messages):
+    async def asend(self, messages, silent=False):
+        self.send(messages, silent)
+
+    def send(self, messages, silent=False):
+        if silent: return
         ms_since_start = int(1000 * (time.monotonic() - self.start))
         for m in messages:
-            print(f"{ms_since_start:8d}> {m}")
+                print(f"{ms_since_start:8d}> {m}")
 
     def close(self):
         pass
@@ -75,7 +78,7 @@ class Output:
 
 class MidiOutput(Output):
     # NOTE: midi channels indexed from 1-16 but mido uses 0-15
-    def __init__(self, midi_port, midi_channel, save_to=None, verbose=False):
+    def __init__(self, midi_port, midi_channel=1, save_to=None, verbose=False):
         super().__init__()
         self.verbose = verbose
         self.port_name = midi_port
@@ -89,27 +92,27 @@ class MidiOutput(Output):
             if os.path.exists(self.midi_file):
                 print(f"Warning: {self.midi_file} already exists. Overwriting...")
 
-    async def send(self, messages):
+    def send(self, messages, silent=False):
         since_start = time.monotonic() - self.start
         for m in messages:
             if hasattr(m, 'channel'):
                 m.channel = self.channel
             self.port.send(m)
-            if self.verbose:
+            if not silent and self.verbose:
                 print(f"{int(1000 * since_start):8d}: {self.port_name[:12]:<12}> {m}")
             if self.midi_file:
                 self.saved_messages.append(m.copy(time = since_start))
 
     def close(self):
+        self.reset()
         self.port.close()
         self.port = None
 
     def reset(self):
         if self.port:
-            self.port.send(mido.Message('reset'))
-            # notes not turning off on reset?
-            for note in range(PITCHES):
-                self.port.send(mido.Message('note_off', note = note))
+            messages = [mido.Message('note_off', note = note) for note in range(PITCHES)]
+            messages.append(mido.Message('reset'))
+            self.send(messages, silent=True)
 
     def __enter__(self):
         self.port = mido.open_output(self.port_name)
@@ -117,8 +120,7 @@ class MidiOutput(Output):
         return self
 
     def __exit__(self, type, value, traceback):
-        self.reset()
-        self.port.close()
+        self.close()
         if self.midi_file:
             self.save_midi_file(self.midi_file)
 
@@ -137,6 +139,51 @@ class MidiOutput(Output):
         if self.verbose:
             print(f"Saving midi to {path}")
         file.save(path)
+
+
+class OSCOutput(Output):
+    """Sends midi messages over OSC"""
+
+    def __init__(self, ip, port, midi_port=128, midi_channel=1, verbose=False):
+        super().__init__()
+        self.verbose = verbose
+        self.ip = ip
+        self.port = int(port)
+        self.midi_channel = min(15, max(0, midi_channel - 1))
+        self.midi_port = midi_port
+
+    def send(self, messages, silent=False):
+        since_start = time.monotonic() - self.start
+        for m in messages:
+            if hasattr(m, 'channel'):
+                m.channel = self.midi_channel
+            # Midi messages are designated in python-osc as tuples of length 4
+            #   port_id, status_byte, note, velocity
+            # Mido.bytes returns a list of ints: 
+            #   status_byte, note, velocity
+            bytes = m.bytes()
+            bytes.insert(0,self.midi_port)
+            self.client.send_message("/midi", tuple(bytes))
+            if not silent and self.verbose:
+                print(f"{int(1000 * since_start):8d}: {self.ip}:{self.port}> {m}")
+
+    def close(self):
+        self.reset()
+        self.client = None
+
+    def reset(self):
+        if self.client:
+            messages = [mido.Message('note_off', note = note) for note in range(PITCHES)]
+            messages.append(mido.Message('reset'))
+            self.send(messages, silent=True)
+
+    def __enter__(self):
+        self.client = SimpleUDPClient(self.ip, self.port)
+        self.reset()
+        return self
+
+    def __exit__(self, type, value, traceback):
+        self.close()
 
 
 async def inputstream_generator(channels=1, **kwargs):
@@ -238,7 +285,7 @@ async def transcribe_frame(model, output,
 
             if len(midi_messages) > 0:
                 # approx: < 0.1ms to send
-                await output.send(midi_messages)
+                await output.asend(midi_messages)
 
             # roll buffer 1 frame length
             if frame_len < buffer_len:
@@ -436,7 +483,7 @@ async def parse_interactive_input(input, params):
 
     if input.startswith('r'):
         print("Resetting midi...")
-        await params['output'].send([mido.Message('reset')])
+        params['output'].reset()
         return None, True
 
     if input.startswith('v'):
@@ -507,26 +554,31 @@ async def wait_first(*futures):
         pass
     return done.pop().result()
 
+def warning(msg):
+    return f"\033[1;31;93mWARNING:\033[0m {msg}"
+
+def error(msg):
+    return f"\033[1;31;40mERROR:\033[0m {msg}"
 
 def check_window_frame(window, frame):
     """Returns true if dimensions are OK, false otherwise"""
     if window < 1024:
-        print(f"window ({window}) must be >= 1024")
+        print(error(f"window ({window}) must be >= 1024"))
         return False
 
     if window > 2048:
-        print(f"\n \033[1;31;40mWARNING:\033[0m window ({window}) should be <= 2048 for minimal latency")
+        print(warning(f"window ({window}) should be <= 2048 for minimal latency"))
     if frame < 256:
-        print(f"\n \033[1;31;40mWARNING:\033[0m frame ({frame}) may cause overruns")
+        print(warning(f"frame ({frame}) may cause overruns"))
 
     if frame >= window:
-        print(f"frame ({frame}) must be < window ({window})")
+        print(error(f"frame ({frame}) must be < window ({window})"))
         return False
 
     if window % frame != 0:
-        print(f"\n \033[1;31;40mWARNING:\033[0m window ({window}) not divisible by frame ({frame})")
+        print(warning(f"window ({window}) not divisible by frame ({frame})"))
     if window // frame != 4:
-        print(f"\n \033[1;31;40mWARNING:\033[0m window ({window}) not 4 times frame size ({frame})")
+        print(warning(f"window ({window}) not 4 times frame size ({frame})"))
 
     return True
 
@@ -540,6 +592,7 @@ async def main(list_devices=None, audio_device=None,
     save_midi_file = None,
     interactive = False,
     debug=False,
+    osc_address = None,
     **kwargs):
 
     if list_devices:
@@ -550,11 +603,11 @@ async def main(list_devices=None, audio_device=None,
         parser.exit(0)
 
     if model_file is None:
-        print("Must supply the name of the model file")
+        print(error("Must supply the name of the model file"))
         parser.exit(1)
 
     if not os.path.exists(model_file):
-        print("Cannot find model file:", model_file)
+        print(error("Cannot find model file:", model_file))
         parser.exit(1)
 
     # window and frame checks and warnings
@@ -575,7 +628,7 @@ async def main(list_devices=None, audio_device=None,
         Frame size:  {kwargs['frame']}""")
 
     # construct output
-    if midi_port is None:
+    if midi_port is None and osc_address is None:
         output_handler = Output()
         if verbose:
             print(f"""
@@ -583,15 +636,34 @@ async def main(list_devices=None, audio_device=None,
         No midi output, display only. Use -p to set midi port.""")
 
     else:
-        # find midi port match by name
-        for name in mido.get_output_names():
-            if midi_port in name:
-                midi_port = name
-                break
+        if osc_address:
+            try:
+                if midi_port is None: raise ValueError 
+                midi_port = int(midi_port) # midi_port is a number for OSC
+            except ValueError:
+                print(error("Must set midi port using -p <number>"))
+                parser.exit(1)
 
-        output_handler = MidiOutput(midi_port, midi_channel, verbose=verbose, save_to=save_midi_file)
-        if verbose:
-            print(f"""
+            ip, port = osc_address.split(":")
+            ip = ip.strip()
+            port = port.strip()
+            output_handler = OSCOutput(ip, port, midi_port, midi_channel, verbose=verbose)
+            if verbose:
+                print(f"""
+    Output: OSC
+        Address: {ip} port: {port} channel: {midi_channel}""")
+
+        else: # use midi
+            # midi port here is the full name
+            # find midi port match by name
+            for name in mido.get_output_names():
+                if midi_port in name:
+                    midi_port = name
+                    break
+
+            output_handler = MidiOutput(midi_port, midi_channel, verbose=verbose, save_to=save_midi_file)
+            if verbose:
+                print(f"""
     Output: midi
         Port: {midi_port} channel: {midi_channel}""")
 
@@ -677,6 +749,10 @@ if __name__ == "__main__":
     parser.add_argument('-c', '--channel', type=int, dest='midi_channel', default=1,
                         help='midi channel (default %(default)s)')
 
+    # OSC put args
+    parser.add_argument('-o', '--osc', type=str, dest='osc_address', default=None,
+                        help='Open Sound Control address (e.g.: 127.0.0.1:4000)')
+
     # testing arguments
     parser.add_argument('-s', '--save-midi', type=str, default=None, dest='save_midi_file',
                         help='filename of midi file to save output to')
@@ -691,6 +767,5 @@ if __name__ == "__main__":
         asyncio.run(main(**vars(args)))
     except KeyboardInterrupt:
         sys.exit('\nInterrupted by user')
-
 
 
