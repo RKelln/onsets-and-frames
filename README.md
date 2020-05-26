@@ -74,7 +74,7 @@ pip install -r requirements.txt
 
 You will need to set up a synth and generally for testing you will need a virtual mic that you can send audio files to. Instructions for this are lengthy and complicated and depend on OS.
 
-For Ubuntu 18.04 something like this may work:
+For Ubuntu 18.04 something like the following may work.
 
 #### Midi playback
 
@@ -179,6 +179,18 @@ python realtime_transcribe.py -l
 ffmpeg -re -i ~/Music/piano_48000rate.wav -f s161e -f alsa hw:2,1
 ```
 
+
+### Noisey dataset
+
+Adding dynamic noise to the dataset requires subproceses that can take a lot of memory, if you run out of memory you can allocate an additional swap:
+
+```bash
+sudo fallocate -l 8G /path/to/swapfile
+sudo chmod 600 /path/to/swapfile 
+sudo mkswap /path/to/swapfile
+sudo swapon /path/to/swapfile
+```
+
 #### Putting it all together:
 ```bash    
 # in tab 1 start fluidsynth:
@@ -190,13 +202,28 @@ aconnect -l
 python realtime_transcribe.py -l
 
 # -d for loopback device index, -p for fluidsynth port and channel:
-python realtime_transcribe.py -d 7 -p 129:0 models/uni/model-1000000.pt
+python -O realtime_transcribe.py -d 7 -p 129:0 onsets_uni_model_rt-1.pt
 
 # in tab 3:
 ffmpeg -re -i ~/Music/piano_48000rate.wav -f s161e -f alsa hw:2,1
 ```
 
+In general something like this should work for sending OSC midi (typically what you'd use to connect to another program like Max/MSP):
+    -O optimization flag turns off the asserts
+    -i flag turns on interactive mode
+    -o OSC output address (sends to 127.0.0.1:1234/midi)
+    -p midi port (additional info sent through OSC)
+    -c midi channel
+    uses default audio input
+```bash
+python -O realtime_transcribe.py -i -o 127.0.0.1:1234 -p 128 -c 1  onsets_uni_model_rt-1.pt
+```
 
+For my system the optimal window and frame settings ended up being 2048 and 139 (where 139 was the largest frame sie observed without overruns):
+```bash
+python -O realtime_transcribe.py -i -o 127.0.0.1:1234 -p 128 -c 1 -w 2048 -f 139  onsets_uni_model_rt-1.pt
+```
+You can see the performance effects of different window and frame options using the `--debug` flag or going into interactive mode (`-i`) and then enter: `debug`. You can change the window and frame settings on the fly using, for exmaple: `w=2048` and `f=139`, respectively.
 
 
 ## Implementation Details

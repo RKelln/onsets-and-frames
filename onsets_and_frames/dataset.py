@@ -1,7 +1,11 @@
-import json
-import os
 from abc import abstractmethod
 from glob import glob
+import json
+import os
+import random
+import subprocess
+import tempfile
+import gc
 
 import numpy as np
 import soundfile
@@ -131,10 +135,11 @@ class PianoRollAudioDataset(Dataset):
             offset_right = min(n_steps, frame_right + HOPS_IN_OFFSET)
 
             f = int(note) - MIN_MIDI
-            label[left:onset_right, f] = 3
-            label[onset_right:frame_right, f] = 2
-            label[frame_right:offset_right, f] = 1
-            velocity[left:frame_right, f] = vel
+            if f < 88 and f >= 0:
+                label[left:onset_right, f] = 3
+                label[onset_right:frame_right, f] = 2
+                label[frame_right:offset_right, f] = 1
+                velocity[left:frame_right, f] = vel
 
         data = dict(path=audio_path, audio=audio, label=label, velocity=velocity)
         torch.save(data, saved_data_path)
@@ -143,10 +148,70 @@ class PianoRollAudioDataset(Dataset):
         return data
 
 
-class MAESTRO(PianoRollAudioDataset):
+class NoisyAudioDataset(PianoRollAudioDataset):
 
-    def __init__(self, path='data/MAESTRO', groups=None, sequence_length=None, seed=42, device=DEFAULT_DEVICE, preload=True):
-        super().__init__(path, groups if groups is not None else ['train'], sequence_length, seed, device, preload=preload)
+    def __init__(self, path, groups=None, sequence_length=None, seed=42, device=DEFAULT_DEVICE, preload=True, 
+        min_noise_vol=0., max_noise_vol=0.05):
+        self.min_noise_vol = min_noise_vol
+        self.max_noise_vol = max_noise_vol
+        super().__init__(path, groups if groups is not None else ['train'], sequence_length=sequence_length, seed=seed, device=device, preload=preload)
+
+    def load_audio(self, audio_path):
+        full_audio_path = os.path.join(self.path, audio_path)
+
+        noise_vol = random.uniform(self.min_noise_vol, self.max_noise_vol)
+
+        # add noise:
+        with tempfile.NamedTemporaryFile(suffix='.wav') as temp_input_with_noise:
+            self.add_noise(full_audio_path, temp_input_with_noise, 0.1, 'pinknoise')
+
+            audio, sr = soundfile.read(temp_input_with_noise.name, dtype='int16')
+            assert sr == SAMPLE_RATE
+        
+        return torch.ShortTensor(audio)
+
+
+    def add_noise(self, input_filename, output_filename, noise_vol, noise_type):
+        """Add noise to a wav file using sox.
+
+        Args:
+            input_filename: Path to the original wav file.
+            output_filename: Path to the output wav file that will consist of the input
+                file plus noise.
+            noise_vol: The volume of the noise to add.
+            noise_type: One of "whitenoise", "pinknoise", "brownnoise".
+
+        Raises:
+            ValueError: If `noise_type` is not one of "whitenoise", "pinknoise", or
+                "brownnoise".
+        """
+        if noise_type not in ('whitenoise', 'pinknoise', 'brownnoise'):
+            raise ValueError('invalid noise type: %s' % noise_type)
+
+        noise_cmd = ['sox', input_filename, '-p', 'synth', noise_type, 'vol', str(noise_vol)]
+        mixer_cmd = ['sox', '-m', input_filename, '-', output_filename.name]
+        #print(f"Executing: {' '.join(noise_cmd)} | {' '.join(mixer_cmd)}" );
+
+        # subprocess may need double the memory, or large swap space: see README
+        # forking causes memory allocation issues, because it copies all the existing python memory
+        gc.collect() # tries to reduce memory
+
+        #p = subprocess.run(args, capture_output=True, shell=True, timeout=20.0)
+
+        p1 = subprocess.Popen(noise_cmd, stdout=subprocess.PIPE)
+        p2 = subprocess.Popen(mixer_cmd, stdin=p1.stdout, stdout=subprocess.PIPE)
+        p1.stdout.close()
+        output = p2.communicate()[0]
+
+        # process_handle = subprocess.Popen(
+        #   command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+        # process_handle.communicate()
+
+
+class MAESTRO(NoisyAudioDataset):
+
+    def __init__(self, path='data/MAESTRO', groups=None, sequence_length=None, seed=42, device=DEFAULT_DEVICE, preload=True, **kwargs):
+        super().__init__(path, groups if groups is not None else ['train'], sequence_length=sequence_length, seed=seed, device=device, preload=preload, **kwargs)
 
     @classmethod
     def available_groups(cls):
@@ -199,3 +264,33 @@ class MAPS(PianoRollAudioDataset):
         assert(all(os.path.isfile(tsv) for tsv in tsvs))
 
         return sorted(zip(flacs, tsvs))
+
+
+class RandomDataset(NoisyAudioDataset):
+
+    def __init__(self, path='data/random', groups=None, sequence_length=None, seed=42, device=DEFAULT_DEVICE, preload=True, **kwargs):
+        super().__init__(path, groups if groups is not None else ['train'], sequence_length=sequence_length, seed=seed, device=device, preload=preload, **kwargs)
+
+    @classmethod
+    def available_groups(cls):
+        return ['train', 'validation', 'test']
+
+    def files(self, group):
+        # sub directory based grouping
+        flacs = sorted(glob(os.path.join(self.path, group, '*.flac')))
+        midis = sorted(glob(os.path.join(self.path, group, '*.mid')))
+        files = list(zip(flacs, midis))
+        if len(files) == 0:
+            raise RuntimeError(f'Group {group} is empty')
+
+        result = []
+        for audio_path, midi_path in files:
+            tsv_filename = midi_path.replace('.mid', '.tsv')
+            if not os.path.exists(tsv_filename):
+                midi = parse_midi(midi_path)
+                np.savetxt(tsv_filename, midi, fmt='%.6f', delimiter='\t', header='onset,offset,note,velocity')
+            result.append(
+                (os.path.relpath(audio_path, self.path),
+                 os.path.relpath(tsv_filename, self.path))
+            )
+        return result

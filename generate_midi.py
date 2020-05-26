@@ -36,6 +36,8 @@ SUSTAIN_STEP = 0.2
 # number of notes active at the same time
 MIN_POLYPHONY = 1
 MAX_POLYPHONY = 20
+# silence in seconds before first note
+START_SILENCE = 1.0
 
 # you can create your own generator scripts to pass in
 example_generation_script = """
@@ -45,7 +47,7 @@ messages = generate_sequence(500,
   tempo_range=linrange(0, 0.5, 0.1),
   sustain_range=linrange(MIN_SUSTAIN, MAX_SUSTAIN, SUSTAIN_STEP),
   polyphony_range=range(5, 20),
-  start_time=0.,
+  start_time=START_SILENCE,
   verbose=verbose
 )
 save_midi(messages, output_path / "generated_example_1.mid")
@@ -126,6 +128,22 @@ class linrange(Sequence):
     def __hash__(self):
         return hash((type(self), self.start, self.stop, self.step))  
 
+SCALE_STEPS = [2,2,1,2,2,2,1] # note steps
+NOTE_NAMES = ["C", "B", "Bb", "A", "Ab", "G", "Gb", "F", "E", "Eb","D", "Db"]
+STARTING_NOTES = [24, 23, 22, 21, 32, 31, 30, 29, 28, 27, 26, 25]
+SCALE_NOTES = []
+for starting_note in STARTING_NOTES:
+  notes = []
+  note = starting_note
+  notes.append(note)
+  scale_steps_index = 0
+  steps_len = len(SCALE_STEPS)
+  while note < MAX_NOTE:
+    note += SCALE_STEPS[scale_steps_index % steps_len]
+    scale_steps_index += 1
+    if note <= MAX_NOTE:
+      notes.append(note)
+  SCALE_NOTES.append(notes)
 
 def generate_sequence(
   length=500, 
@@ -135,10 +153,12 @@ def generate_sequence(
   sustain_range=linrange(MIN_SUSTAIN, MAX_SUSTAIN, SUSTAIN_STEP),
   polyphony_range=range(MIN_POLYPHONY, MAX_POLYPHONY),
   start_time=0.,
-  verbose = False):
+  verbose = False,
+  note_step=None):
   
   midi = []
   current_notes = []
+  note_index = None
   current_end_times = []
   poly = random.choice(polyphony_range)
   current_time = start_time
@@ -146,11 +166,29 @@ def generate_sequence(
   if verbose:
     print(".", end = '', flush=True)
 
-  while current_time < length and len(midi) < length:
+  while int(current_time) < length and len(midi) < length:
     if len(midi) % 100 == 0 and verbose:
       print(".", end = '', flush=True)
 
-    note = random.choice(note_range)
+    if note_step is None or note_index is None:
+      note_index = random.randrange(len(note_range))
+    else:
+      step = note_step
+      if not isinstance(note_step, int):
+        step = random.choice(note_step)
+      # step through the note_range
+      note_index += step
+      # loop on overrun
+      if note_index < 0:
+        note_index = len(note_range) + note_index
+      elif note_index >= len(note_range):
+        note_index = note_index - len(note_range) 
+
+    note = note_range[note_index]
+    # ensure that we aren't out of bounds
+    if note < MIN_NOTE or note > MAX_NOTE:
+      continue
+
     if len(current_notes) == 0 or (note not in current_notes and len(current_notes) < poly):
       # add a new note
       velocity = random.choice(velocity_range)
@@ -194,6 +232,9 @@ def save_midi(messages, filepath):
   last_tick = 0
   for m in messages:
       current_tick = int(m.time * ticks_per_second)
+      # ensure a minimum start silence
+      if current_tick <= 0:
+        current_tick = int(START_SILENCE * ticks_per_second)
       m.time = current_tick - last_tick
       track.append(m)
       last_tick = current_tick
@@ -217,7 +258,7 @@ def main(seed=SEED, verbose=False, output_path='.', generator_script=None):
       tempo_range=linrange(MIN_TEMPO, MAX_TEMPO, TEMPO_STEP),
       sustain_range=linrange(MIN_SUSTAIN, MAX_SUSTAIN, SUSTAIN_STEP),
       polyphony_range=range(MIN_POLYPHONY, MAX_POLYPHONY),
-      start_time=0.,
+      start_time=START_SILENCE,
       verbose=verbose
     )
     save_midi(messages, output_path / file_name)

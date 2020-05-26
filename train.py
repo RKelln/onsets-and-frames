@@ -67,14 +67,21 @@ def train(logdir, datadir, device, iterations, resume_iteration, checkpoint_inte
 
     train_groups, validation_groups = ['train'], ['validation']
 
-    if leave_one_out is not None:
-        all_years = {'2004', '2006', '2008', '2009', '2011', '2013', '2014', '2015', '2017', '2018'}
-        train_groups = list(all_years - {str(leave_one_out)})
-        validation_groups = [str(leave_one_out)]
 
     if train_on == 'MAESTRO':
+        if leave_one_out is not None:
+            all_years = {'2004', '2006', '2008', '2009', '2011', '2013', '2014', '2015', '2017', '2018'}
+            train_groups = list(all_years - {str(leave_one_out)})
+            validation_groups = [str(leave_one_out)]
         dataset = MAESTRO(path=datadir, groups=train_groups, sequence_length=sequence_length, preload=preload)
         validation_dataset = MAESTRO(path=datadir, groups=validation_groups, sequence_length=sequence_length, preload=preload)
+    elif train_on == 'random':
+        if leave_one_out is not None:
+            all_random = set([ f.name for f in os.scandir(datadir) if f.is_dir() ])
+            train_groups = list(all_random - {str(leave_one_out)})
+            validation_groups = [str(leave_one_out)]
+        dataset = RandomDataset(path=datadir, groups=train_groups, sequence_length=sequence_length, preload=preload)
+        validation_dataset = RandomDataset(path=datadir, groups=validation_groups, sequence_length=sequence_length, preload=preload)
     else:
         dataset = MAPS(groups=['AkPnBcht', 'AkPnBsdf', 'AkPnCGdD', 'AkPnStgb', 'SptkBGAm', 'SptkBGCl', 'StbgTGd2'], sequence_length=sequence_length)
         validation_dataset = MAPS(groups=['ENSTDkAm', 'ENSTDkCl'], sequence_length=validation_length)

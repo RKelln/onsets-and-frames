@@ -720,7 +720,7 @@ async def main(list_devices=None, audio_device=None,
 
 if __name__ == "__main__":
 
-    parser = argparse.ArgumentParser(description=usage_line)
+    parser = argparse.ArgumentParser()
 
     parser.add_argument('-v', '--verbose', action='store_true', help='verbose')
 
