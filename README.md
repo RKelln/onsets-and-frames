@@ -59,7 +59,17 @@ python evaluate.py runs/model/model-100000.pt Maestro test
 
 WIP: Very experimental and currently non-functional. Some basic install and use instructions:
 
-NOTE: Uses python 3.7, thus for conda install something like this:
+#### Models
+
+Download the model here:
+[Realtime unidirectional model](https://drive.google.com/open?id=18VEiJAb4CKRSo_FZAcPC6g9A_sD6X8rY)
+
+You can also try this model that isn't as optimized for realtime use:
+[Unidirectional model](https://drive.google.com/open?id=19vDyiVoQDZ-B0KGOdOS78vIsWxgJbw-0)
+
+#### Installation
+
+NOTE: Uses python 3.7, thus when using `conda`, something like this should work:
 
 ```bash
 conda create -n py3_onsets python=3.7

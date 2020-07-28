@@ -554,11 +554,14 @@ async def wait_first(*futures):
         pass
     return done.pop().result()
 
+
 def warning(msg):
     return f"\033[1;31;93mWARNING:\033[0m {msg}"
 
+
 def error(msg):
     return f"\033[1;31;40mERROR:\033[0m {msg}"
+
 
 def check_window_frame(window, frame):
     """Returns true if dimensions are OK, false otherwise"""
@@ -581,6 +584,7 @@ def check_window_frame(window, frame):
         print(warning(f"window ({window}) not 4 times frame size ({frame})"))
 
     return True
+
 
 async def main(list_devices=None, audio_device=None,
     gain=1.,
