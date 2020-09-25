@@ -74,12 +74,18 @@ NOTE: Uses python 3.7, thus when using `conda`, something like this should work:
 ```bash
 conda create -n py3_onsets python=3.7
 conda activate py3_onsets
-conda install pytorch=1.3.1 torchvision=0.4.2 cudatoolkit=10.1 -c pytorch
+conda install pytorch=1.6 torchvision cudatoolkit=10.2 -c pytorch
 git clone https://github.com/RKelln/onsets-and-frames.git
 cd onsets-and-frames
 # currently realtime code lives in the realtime branch:
 git checkout realtime
 pip install -r requirements.txt
+```
+
+On Linux you may also need to install PortAudio for `sounddevice` to work:
+
+```bash
+sudo apt-get install libportaudio2
 ```
 
 You will need to set up a synth and generally for testing you will need a virtual mic that you can send audio files to. Instructions for this are lengthy and complicated and depend on OS.
