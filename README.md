@@ -57,12 +57,15 @@ python evaluate.py runs/model/model-100000.pt Maestro test
 
 ### Real-time 
 
-WIP: Very experimental and currently non-functional. Some basic install and use instructions:
+WIP: Very experimental! Some basic install and use instructions:
 
 #### Models
 
 Download the model here:
-[Realtime unidirectional model](https://drive.google.com/open?id=18VEiJAb4CKRSo_FZAcPC6g9A_sD6X8rY)
+
+[Realtime unidirectional model for pytorch 1.6](https://drive.google.com/file/d/1dldVhq4dzO4Xkg7IBjEldfjEHvA4VBIq)
+
+Deprecated: [Realtime unidirectional model for pytorch 1.3](https://drive.google.com/open?id=18VEiJAb4CKRSo_FZAcPC6g9A_sD6X8rY)
 
 You can also try this model that isn't as optimized for realtime use:
 [Unidirectional model](https://drive.google.com/open?id=19vDyiVoQDZ-B0KGOdOS78vIsWxgJbw-0)
@@ -72,15 +75,24 @@ You can also try this model that isn't as optimized for realtime use:
 NOTE: Uses python 3.7, thus when using `conda`, something like this should work:
 
 ```bash
-conda create -n py3_onsets python=3.7
-conda activate py3_onsets
-conda install pytorch=1.3.1 torchvision=0.4.2 cudatoolkit=10.1 -c pytorch
+conda create -n py3_pt1-6_onsets python=3.7
+conda activate py3_pt1-6_onsets
+conda install numpy numba scipy
+conda install pytorch=1.6 torchvision=0.7 cudatoolkit=10.2 -c pytorch
 git clone https://github.com/RKelln/onsets-and-frames.git
 cd onsets-and-frames
 # currently realtime code lives in the realtime branch:
 git checkout realtime
 pip install -r requirements.txt
 ```
+
+Previous pytorch 1.3 install:
+```bash
+conda create -n py3_onsets python=3.7
+conda activate py3_onsets
+conda install pytorch=1.3.1 torchvision=0.4.2 cudatoolkit=10.1 -c pytorch
+```
+Then as above for pytorch 1.6.
 
 You will need to set up a synth and generally for testing you will need a virtual mic that you can send audio files to. Instructions for this are lengthy and complicated and depend on OS.
 
