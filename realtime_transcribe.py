@@ -586,6 +586,20 @@ def check_window_frame(window, frame):
     return True
 
 
+def cuda_info():
+    print("\nCUDA info:")
+    device_count = torch.cuda.device_count()
+    if device_count == 0:
+        print("No CUDA devices found")
+        return
+    print("Devices:")
+    for i in range(device_count):
+        selected = "*" if torch.cuda.current_device() == i else " "
+        name = torch.cuda.get_device_name(i)
+        capability = torch.cuda.get_device_capability(i)
+        print(f"""{selected}{i}: {name}: supports CUDA {capability}""")
+
+
 async def main(list_devices=None, audio_device=None,
     gain=1.,
     model_file = None,
@@ -604,6 +618,7 @@ async def main(list_devices=None, audio_device=None,
         print(sd.query_devices())
         print("\nMidi output available:")
         print(mido.get_output_names())
+        cuda_info()
         parser.exit(0)
 
     if model_file is None:
@@ -677,6 +692,7 @@ async def main(list_devices=None, audio_device=None,
         Note on threshold:  {kwargs['onset_threshold']}
         Note off threshold: {kwargs['frame_threshold']}
     """)
+        cuda_info()
 
     with torch.no_grad():
         model = torch.load(model_file, map_location=ml_device).eval()

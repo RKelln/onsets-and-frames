@@ -85,7 +85,6 @@ cd onsets-and-frames
 git checkout realtime
 pip install -r requirements.txt
 ```
-
 Previous pytorch 1.3 install:
 ```bash
 conda create -n py3_onsets python=3.7
@@ -93,6 +92,13 @@ conda activate py3_onsets
 conda install pytorch=1.3.1 torchvision=0.4.2 cudatoolkit=10.1 -c pytorch
 ```
 Then as above for pytorch 1.6.
+
+
+Finally, on Linux you may also need to install PortAudio for `sounddevice` to work:
+
+```bash
+sudo apt-get install libportaudio2
+```
 
 You will need to set up a synth and generally for testing you will need a virtual mic that you can send audio files to. Instructions for this are lengthy and complicated and depend on OS.
 
